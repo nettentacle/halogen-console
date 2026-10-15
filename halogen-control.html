@@ -1,0 +1,1672 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<title>HALOGEN 控制台</title>
+<style>
+/* ============================================================
+   HALOGEN 控制台样式（2026-10-01 单层整合版）
+   此前三代样式层层覆盖，这里合并为一层：基础（流式）→ 窄屏 →
+   ≥1000px 桌面锁定（16:9 一屏，页面不滚动，日志/表格内部滚动）。
+   设计语言：仪表台。数字一律等宽字体（读数感），强调色只用于
+   状态与峰值，运行中的状态灯带"点亮"辉光，其余保持安静。
+   ============================================================ */
+html[data-theme="dark"] {
+  --bg:        #0b0f16;
+  --card:      #131a25;
+  --raised:    #1b2432;
+  --fg:        #e9eef7;
+  --muted:     #a7b4c8;
+  --faint:     #8b99ad;
+  --border:    #243044;
+  --border-hi: #3a4a63;
+  --accent:    #6d8fff;
+  --ok:        #5fd3a4;
+  --warn:      #e8b04a;
+  --danger:    #f0616d;
+  --shadow:    0 1px 2px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 22%);
+}
+html[data-theme="light"] {
+  --bg:        #eef2f8;
+  --card:      #ffffff;
+  --raised:    #e8eef7;
+  --fg:        #16202f;
+  --muted:     #4d5c72;
+  --faint:     #5f6d82;
+  --border:    #d6dfec;
+  --border-hi: #b6c6dc;
+  --accent:    #2f56cc;
+  --ok:        #177a52;
+  --warn:      #9a6b12;
+  --danger:    #c93a48;
+  --shadow:    0 1px 2px rgb(0 0 0 / 6%), 0 8px 24px rgb(0 0 0 / 6%);
+}
+
+:root {
+  --radius: 12px;
+  --r-sm: calc(var(--radius) * 0.6);
+  --r-md: calc(var(--radius) * 0.8);
+  --r-lg: var(--radius);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono",
+               Menlo, Consolas, monospace;
+  --step: 4px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+/* 仪表读数一律等宽：刷新时数字不抖动，也构成控制台的"仪器"身份。
+   单位（tok/s、GB）留在无衬线里，与数字形成对照。 */
+.num, .kpi-val, .res-val, .spd, .tag, .kv b, .kpi-note,
+table.tbl td, #logs { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* ---------- 布局骨架（流式：窄屏自然堆叠） ---------- */
+.wrap { max-width: 1680px; margin: 0 auto; padding: 28px 32px;
+        min-height: 100dvh; display: flex; flex-direction: column; }
+.main { display: grid; grid-template-columns: 1fr; gap: 20px;
+        align-items: start; flex: 1 1 auto; min-height: 0; }
+.main > *, .det > *, .kpis > *, .actions > * { min-width: 0; }
+.main > .col { display: flex; flex-direction: column; gap: 20px; min-height: 0; }
+.det { display: flex; flex-direction: column; gap: 20px; min-height: 0; }
+
+/* ---------- 顶栏 ---------- */
+.top { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+       margin-bottom: 24px; padding-bottom: 22px; border-bottom: 1px solid var(--border); }
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.logo { width: 44px; height: 44px; flex: none; border-radius: 13px; background: var(--accent);
+        display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 23px;
+        box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 45%, transparent),
+                    0 2px 12px color-mix(in oklab, var(--accent) 30%, transparent); }
+h1 { font-size: 19px; font-weight: 600; margin: 0; letter-spacing: .025em; }
+.state { font-size: 14px; color: var(--muted); margin: 2px 0 0; display: flex;
+         align-items: center; gap: 6px; flex-wrap: wrap; }
+.spacer { margin-left: auto; }
+/* 服务状态值用大写（systemd 语义），中文不受影响 */
+#dUnit { text-transform: uppercase; }
+
+/* 状态灯：运行中的绿灯带辉光——整页唯一的"发光体"，一眼确认引擎活着 */
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.dot.on  { background: var(--ok);
+           box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 22%, transparent),
+                       0 0 12px 2px color-mix(in oklab, var(--ok) 45%, transparent); }
+.dot.load{ background: var(--warn); animation: pulse 1.3s ease-in-out infinite; }
+.dot.err { background: var(--danger);
+           box-shadow: 0 0 0 3px color-mix(in oklab, var(--danger) 22%, transparent),
+                       0 0 12px 2px color-mix(in oklab, var(--danger) 40%, transparent); }
+.dot.warn{ background: var(--warn); }
+@keyframes pulse { 50% { opacity: .3; } }
+
+/* ---------- 通用控件 ---------- */
+button { font: inherit; cursor: pointer; border: 1px solid transparent; border-radius: var(--r-md);
+         transition: background-color .14s ease, border-color .14s ease, opacity .14s ease, transform .06s ease; }
+button:active:not(:disabled) { transform: translateY(.5px); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.btn { padding: 11px 16px; font-size: 14px; font-weight: 600; width: 100%;
+       display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: color-mix(in oklab, var(--accent) 88%, white); }
+.btn-ghost { background: var(--raised); color: var(--fg); border-color: var(--border); }
+.btn-ghost:hover:not(:disabled) { background: color-mix(in oklab, var(--raised) 80%, var(--fg)); }
+.btn-danger { background: transparent; color: var(--danger); border-color: color-mix(in oklab, var(--danger) 45%, transparent); }
+.btn-danger:hover:not(:disabled) { background: color-mix(in oklab, var(--danger) 14%, transparent); }
+
+/* 触控目标一律不小于 44×44（移动端可点性下限） */
+.icon-btn { background: var(--raised); border-color: var(--border); color: var(--muted);
+            width: 44px; height: 44px; border-radius: var(--r-md); display: grid;
+            place-items: center; font-size: 17px; }
+.icon-btn:hover { color: var(--fg); }
+
+.actions { display: flex; gap: 10px; margin: 0; flex-wrap: wrap; }
+.actions .btn { width: auto; padding: 9px 15px; min-height: 44px; }
+
+/* 引擎切换分段控件：halogen / kyojin / strata / gsqhalo 四选一（都要独占本机内存，互斥运行） */
+.seg { display: inline-flex; gap: 3px; padding: 3px; flex: none;
+       background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-md); }
+.seg-btn { border: 0; background: transparent; color: var(--muted); font-size: 13px;
+           font-weight: 600; padding: 6px 13px; border-radius: calc(var(--r-md) - 3px); }
+.seg-btn:hover { color: var(--fg); }
+.seg-btn.on { background: var(--card); color: var(--fg); box-shadow: var(--shadow); }
+.seg-btn.on[data-engine="kyojin"], .seg-btn.on[data-engine="strata"],
+.seg-btn.on[data-engine="gsqhalo"] { color: var(--accent); }
+/* 正在运行的那个引擎的按钮带一个绿点，一眼看出"现在活的是谁" */
+.seg-btn.live::after { content: "•"; color: var(--ok); margin-left: 5px; }
+/* kyojin 的模型子选择（只在该引擎被选中时出现；变体之间同样互斥，启动/重启时生效） */
+.ksel { background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-md);
+        color: var(--fg); font-size: 13px; font-weight: 600; padding: 6px 8px; max-width: 200px; }
+
+/* ---------- 卡片 ---------- */
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; }
+.card > h2 { font-size: 14px; font-weight: 600; color: var(--fg); margin: 0 0 18px;
+             display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 10px; }
+.card > h2 .hint { font-size: 12px; color: var(--faint); font-weight: 400; }
+
+/* ---------- KPI 层 ---------- */
+.kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.kpi { background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+       padding: 20px; display: flex; flex-direction: column; min-height: 185px; }
+.kpi-label { font-size: 13px; color: var(--muted); font-weight: 500;
+             display: flex; flex-wrap: wrap; gap: 2px 7px; margin-bottom: 15px; }
+/* 主数字是"最近一次完成的请求"，这里标出来，免得被当成实时值 */
+.when { color: var(--faint); font-weight: 400; font-size: 12px; }
+/* 明细行里的 .when 不在 flex 容器里，靠自身外边距与标签拉开 */
+.kv .when { margin-left: 7px; }
+.kpi-val { font-size: clamp(28px, 2.6vw, 42px); font-weight: 600; letter-spacing: -.02em; line-height: 1.05; }
+.kpi-val small { font-family: var(--font-sans); font-size: 14px; font-weight: 500;
+                 color: var(--muted); margin-left: 6px; letter-spacing: 0; }
+.kpi-val.dim { font-size: 28px; font-weight: 600; overflow-wrap: anywhere; }
+/* 引擎卡片的副行（更新检查结果）：等宽、可断行，过长不撑破卡片 */
+.kpi-note { font-size: 13px; color: var(--muted); margin-top: 10px;
+            overflow-wrap: anywhere; line-height: 1.35; }
+/* 有新版本时用告警色点出来：这是一条"要动手"的信息 */
+.kpi-note.upd-new { color: var(--warn); font-weight: 600; }
+.kpi-note a { color: inherit; text-decoration: none; border-bottom: 1px solid currentColor; }
+.kpi-foot { margin-top: auto; padding-top: 16px; font-size: 13px; color: var(--faint);
+            display: flex; justify-content: space-between; align-items: flex-end;
+            gap: 8px; flex-wrap: wrap; }
+.kpi-foot .num { color: var(--muted); }
+/* 峰值用强调色点出来，和平均值区分开 */
+.kpi-foot .peak .num { color: var(--accent); font-weight: 600; }
+
+/* sparkline：贴在卡片底边的走纸带，基线是一条发丝线 */
+.spark { width: 100%; height: 30px; display: block; color: var(--accent); }
+.spark-area { fill: currentColor; opacity: .13; stroke: none; }
+.spark-line { fill: none; stroke: currentColor; stroke-width: 1.6;
+              stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.spark-empty { height: 30px; margin-top: 12px; border-bottom: 1px solid var(--border); }
+.c-cpu  { color: var(--accent); }
+.c-gpu  { color: #e8a13d; }
+.c-npu  { color: #a583f0; }
+.c-disk { color: #4fb8d8; }
+.c-ok   { color: var(--ok); }
+
+/* ---------- 资源层 ---------- */
+.res { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+.res-item { min-width: 0; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
+.res-head { display: flex; align-items: baseline; justify-content: space-between;
+            gap: 4px 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.res-label { font-size: 14px; color: var(--muted); }
+.res-val { font-size: 15px; font-weight: 600; }
+.res-val em { font-style: normal; color: var(--faint); font-weight: 500;
+              font-size: 13px; margin-left: 4px; }
+.bar { height: 8px; border-radius: 999px; background: var(--raised); overflow: hidden; }
+.bar > i { display: block; height: 100%; border-radius: 999px; background: var(--accent);
+           transition: width .5s cubic-bezier(.4,0,.2,1); }
+.bar > i.warn { background: var(--warn); }
+.bar > i.danger { background: var(--danger); }
+.tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.tag { font-size: 12px; padding: 3px 8px; border-radius: 999px;
+       background: var(--raised); color: var(--muted); }
+.tag b { color: var(--fg); font-weight: 600; }
+
+/* ---------- 右栏明细 ---------- */
+.kv { display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+      padding: 9px 0; font-size: 13px; border-bottom: 1px solid var(--border); }
+.kv:last-child { border-bottom: 0; }
+.kv span { color: var(--muted); flex: none; }
+.kv b { font-weight: 600; text-align: right; min-width: 0; overflow-wrap: anywhere; }
+
+/* 设置行：开关与导出按钮并排 */
+.setrow { display: flex; align-items: center; justify-content: space-between;
+          gap: 12px 14px; flex-wrap: wrap; margin-bottom: 16px; }
+.setrow-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.switch { display: flex; align-items: center; gap: 12px; cursor: pointer;
+          user-select: none; min-height: 44px; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.track { width: 44px; height: 26px; border-radius: 999px; background: var(--raised);
+         border: 1px solid var(--border); position: relative; transition: background-color .18s ease; flex: none; }
+.knob { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%;
+        background: var(--muted); transition: transform .18s cubic-bezier(.4,0,.2,1), background-color .18s ease; }
+.switch input:checked + .track { background: var(--accent); border-color: transparent; }
+.switch input:checked + .track .knob { transform: translateX(18px); background: #fff; }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+details summary { cursor: pointer; font-size: 14px; color: var(--muted); list-style: none;
+                  min-height: 44px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "▸ "; display: inline-block; transition: transform .15s ease; }
+details[open] summary::before { transform: rotate(90deg); }
+#logMeta { overflow-wrap: anywhere; }
+pre { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-md);
+      padding: 12px; font-size: 13px; line-height: 1.55; overflow: auto;
+      max-height: clamp(240px, 26vh, 420px); white-space: pre-wrap; margin: 12px 0 0;
+      /* 窄栏里让超长 token 也能断开，否则日志会把右栏顶宽 */
+      overflow-wrap: anywhere;
+      font-family: var(--font-mono); color: var(--muted); }
+/* 日志按级别着色；颜色只是辅助，原文始终可读 */
+#logs .l-err  { color: var(--danger); }
+#logs .l-warn { color: var(--warn); }
+#logs .l-ok   { color: var(--ok); }
+.livedot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
+           display: inline-block; vertical-align: middle; margin: 0 6px;
+           animation: pulse 1.6s ease-in-out infinite; }
+.livedot.paused { background: var(--faint); animation: none; }
+
+/* ---------- 加载 / 错误 / 提示 ---------- */
+.banner { display: none; align-items: center; gap: 10px; padding: 11px 16px;
+          border-radius: var(--r-md); font-size: 14px; margin-bottom: 16px;
+          border: 1px solid color-mix(in oklab, var(--danger) 40%, transparent);
+          background: color-mix(in oklab, var(--danger) 12%, transparent); color: var(--fg); }
+.banner.show { display: flex; }
+.toast { position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 14px);
+         background: var(--card); border: 1px solid var(--border-hi); color: var(--fg);
+         padding: 11px 16px; border-radius: var(--r-md); box-shadow: var(--shadow);
+         font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease;
+         max-width: min(90vw, 460px); z-index: 50; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.bad { border-color: color-mix(in oklab, var(--danger) 55%, transparent); }
+
+/* ---------- 告警条：阈值越界时才出现，整行胶囊 ---------- */
+.alerts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+          min-width: 0; order: 5; width: 100%; }
+.alerts:empty { display: none; }
+.alert { display: inline-flex; align-items: center; gap: 8px; width: 100%;
+         padding: 10px 14px; border-radius: 10px; font-size: 14px; line-height: 1.35;
+         border: 1px solid color-mix(in oklab, var(--warn) 42%, transparent);
+         background: color-mix(in oklab, var(--warn) 12%, transparent); }
+.alert.crit { border-color: color-mix(in oklab, var(--danger) 48%, transparent);
+              background: color-mix(in oklab, var(--danger) 13%, transparent); }
+.alert .dot { flex: none; }
+.alert b { font-weight: 600; }
+.alert .fix { color: var(--muted); }
+
+/* ---------- 小按钮（导出、日志工具条） ---------- */
+.btn-sm { padding: 8px 13px; font-size: 13px; font-weight: 500;
+          border-radius: var(--r-sm); background: var(--raised); color: var(--fg);
+          border: 1px solid var(--border); min-height: 44px; white-space: nowrap; }
+.btn-sm:hover:not(:disabled) { background: color-mix(in oklab, var(--raised) 80%, var(--fg)); }
+.btn-sm.on { background: color-mix(in oklab, var(--warn) 22%, transparent);
+             border-color: color-mix(in oklab, var(--warn) 45%, transparent); }
+
+/* ---------- 日志工具条 ---------- */
+.logtools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+.logtools input { flex: 1 1 150px; min-width: 0; min-height: 44px;
+                  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm);
+                  color: var(--fg); padding: 6px 11px; font: inherit; font-size: 13px; }
+.logtools input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------- 请求历史表 ---------- */
+.tblwrap { overflow: auto; margin-top: 4px; max-height: 320px; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.tbl th { text-align: right; font-weight: 600; color: var(--muted); white-space: nowrap;
+               padding: 12px 10px; border-bottom: 1px solid var(--border-hi);
+               position: sticky; top: 0; background: var(--card); z-index: 1; }
+table.tbl th:first-child, table.tbl td:first-child { text-align: left; }
+table.tbl td { text-align: right; padding: 12px 10px; border-bottom: 1px solid var(--border);
+               white-space: nowrap; }
+table.tbl tbody tr:hover { background: var(--raised); }
+table.tbl tr:last-child td { border-bottom: 0; }
+.tbl-empty { color: var(--faint); font-size: 13px; padding: 32px 12px; text-align: center; }
+
+[hidden] { display: none !important; }
+
+/* ---------- 窄屏 ---------- */
+@media (min-width: 760px) and (max-width: 999px) {
+  /* 中等宽度：右栏两块卡片并排，避免整页过长 */
+  .det { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
+}
+@media (max-width: 759px) {
+  .wrap { padding: 18px 14px; }
+  .top { gap: 12px; margin-bottom: 20px; }
+  .brand { flex: 1; }
+  .spacer { display: none; }
+  .actions { order: 3; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
+  .actions .seg { grid-column: 1 / -1; }
+  .actions .seg-btn { flex: 1; min-height: 38px; }
+  .actions .btn { padding: 10px 6px; font-size: 13px; }
+  .kpis { grid-template-columns: 1fr 1fr; gap: 12px; }
+  .kpi { padding: 16px; min-height: 172px; }
+  .kpi:last-child { grid-column: 1 / -1; min-height: 130px; }
+  .card { padding: 18px; }
+  .res { gap: 16px; }
+}
+@media (max-width: 419px) {
+  .res { grid-template-columns: 1fr; }
+  .kpi-val { font-size: 28px; }
+  .kpi-val small { display: block; margin: 5px 0 0; }
+}
+
+/* ---------- 桌面：锁定 16:9 视口，页面不滚动，只有日志/表格内滚 ---------- */
+@media (min-width: 1000px) {
+  html, body { height: 100%; overflow: hidden; }
+  .wrap { width: 100%; max-width: 1920px; height: 100dvh; min-height: 0;
+          padding: clamp(10px, 1.5vh, 18px) clamp(14px, 1.4vw, 28px); overflow: hidden; }
+  .top { flex: none; gap: 12px; margin-bottom: 12px; padding-bottom: 12px; }
+  .logo { width: 38px; height: 38px; border-radius: 11px; font-size: 19px; }
+  h1 { font-size: 17px; }
+  .alerts { max-height: 11vh; overflow: auto; }
+  .alert { padding: 6px 10px; font-size: 13px; }
+  .banner { flex: none; margin-bottom: 10px; }
+  .main { flex: 1; min-height: 0; grid-template-columns: minmax(0, 1.85fr) minmax(330px, 1fr);
+          grid-template-rows: minmax(0, 1fr); gap: 12px; align-items: stretch; }
+  .main > .col { display: grid; min-height: 0; gap: 12px;
+                 grid-template-rows: minmax(130px, .8fr) minmax(245px, 1.6fr) minmax(100px, 1fr); }
+  .det { display: grid; min-height: 0; gap: 12px; align-items: stretch;
+         grid-template-rows: auto minmax(0, 1fr); }
+  .card { padding: clamp(12px, 1.6vh, 18px); min-height: 0; }
+  .card > h2 { flex: none; margin-bottom: 10px; font-size: 14px; }
+  .main > .col > .card, .det > .card:last-child { display: flex; flex-direction: column; min-height: 0; }
+  .kpis { gap: 12px; min-height: 0; }
+  .kpi { min-height: 0; padding: clamp(10px, 1.4vh, 16px); }
+  .kpi-label { margin-bottom: 8px; font-size: 13px; }
+  .kpi-val { font-size: clamp(27px, 3.8vh, 42px); }
+  .kpi-val.dim { font-size: clamp(23px, 3vh, 32px); }
+  .kpi-note { margin-top: 6px; font-size: 12px; }
+  .kpi-foot { padding-top: 6px; font-size: 12px; }
+  .spark-empty { height: clamp(18px, 2.8vh, 30px); margin-top: 6px; flex-shrink: 0; }
+  .spark { height: clamp(18px, 2.8vh, 30px); }
+  /* 行高按内容定底线、有余量才拉伸：写死 repeat(N, 1fr) 时行数一变（2026-10-08
+     加 NPU 行即为例），fr 行会被挤到低于内容，几行文字叠在一起。窗口不够高时
+     就让这一块自己滚（与日志/表格内部滚动同一约定），而不是硬压。 */
+  .res { flex: 1; min-height: 0; grid-template-columns: repeat(2, minmax(0, 1fr));
+         grid-auto-rows: minmax(min-content, 1fr); gap: 10px 20px;
+         align-content: stretch; overflow-y: auto; }
+  .res-item { padding-bottom: 8px; }
+  .res-head { margin-bottom: 5px; }
+  .res-val { font-size: 14px; }
+  .res-label { font-size: 13px; }
+  .tags { margin-top: 5px; gap: 4px; }
+  .tag { font-size: 11px; padding: 2px 6px; }
+  .kv { padding: clamp(3px, .6vh, 7px) 0; font-size: 13px; }
+  .kv > span { max-width: 48%; }
+  .setrow { gap: 6px; margin-bottom: 6px; }
+  .setrow-actions { gap: 6px; }
+  .btn-sm { padding: 5px 9px; min-height: 34px; font-size: 12px; }
+  .switch { min-height: 34px; }
+  /* 日志 details 撑满卡片剩余高度。details 的内容在 UA shadow slot 里，
+     直接给 #logs 设 flex 不生效，用 ::details-content 命中那个内容盒承接弹性高度。 */
+  #logBox { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  #logBox::details-content { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  #logBox:not([open])::details-content { display: none; }
+  #logBox summary { flex: none; min-height: 30px; font-size: 13px; }
+  .logbody { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .logtools { flex: none; margin-top: 5px; gap: 6px; }
+  .logtools input { min-height: 34px; }
+  #logs { flex: 1 1 0; height: 0; min-height: 0; max-height: none; margin-top: 8px;
+          padding: 10px; font-size: 12px; }
+  .tblwrap { flex: 1; min-height: 0; max-height: none; }
+  table.tbl { font-size: 12px; }
+  table.tbl th, table.tbl td { padding: 7px 8px; }
+  .tbl-empty { padding: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="top">
+    <div class="brand">
+      <div class="logo">H</div>
+      <div>
+        <h1 data-i18n="app.title">HALOGEN 控制台</h1>
+        <p class="state" id="stateLine" aria-live="polite">
+          <span class="dot" id="dot"></span><span id="stateText" data-i18n="state.connecting">正在连接…</span>
+        </p>
+      </div>
+    </div>
+    <!-- 告警条：阈值越界才出现，紧跟标题右侧，正常状态不占位 -->
+    <div class="alerts" id="alerts" aria-live="polite"></div>
+    <div class="spacer"></div>
+    <div class="actions">
+      <!-- 引擎切换：四个引擎都要独占本机内存，同一时刻只能跑一个 -->
+      <div class="seg" id="engineSeg" role="group" data-i18n-aria="eng.pick">
+        <button class="seg-btn" id="engBtn-halogen" data-engine="halogen">halogen</button>
+        <button class="seg-btn" id="engBtn-kyojin"  data-engine="kyojin">kyojin</button>
+        <button class="seg-btn" id="engBtn-strata"  data-engine="strata">strata</button>
+        <button class="seg-btn" id="engBtn-gsqhalo" data-engine="gsqhalo">gsqhalo</button>
+      </div>
+      <!-- kyojin 的模型子选择（GLM/Qwen 两条车道互斥；只在该引擎被选中时显示） -->
+      <select class="ksel" id="kVariant" hidden data-i18n-aria="kv.pick"></select>
+      <!-- halogen 的检查点子选择（破限/标准 .hgn 文件；同一单元换 HALOGEN_CHECKPOINT
+           行，与 kyojin 变体同规则：只改"启动/重启哪一个"，点按钮才生效） -->
+      <select class="ksel" id="hCheckpoint" hidden data-i18n-aria="cp.pick"></select>
+      <button class="btn btn-primary" id="bStart" data-i18n="btn.start">启动模型</button>
+      <button class="btn btn-ghost"   id="bRestart" data-i18n="btn.restart">重启模型</button>
+      <button class="btn btn-danger"  id="bStop" data-i18n="btn.stop">停止模型</button>
+    </div>
+    <button class="icon-btn" id="langBtn" title="切换语言 / Switch language">EN</button>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题"
+            data-i18n-title="theme.toggle" data-i18n-aria="theme.toggle">◐</button>
+  </div>
+
+  <div class="banner" id="banner" role="alert">
+    <span class="dot err"></span>
+    <span id="bannerText" data-i18n="banner.lost">与控制台服务失去连接，正在重试…</span>
+  </div>
+
+  <main class="main">
+   <div class="col"><!-- 左栏：KPI + 资源 + 请求历史 -->
+  <!-- KPI 层：一眼看完最重要的三个数 -->
+  <div class="kpis">
+    <div class="kpi">
+      <div class="kpi-label"><span data-i18n="kpi.prefill">预填充速度</span><span class="when" data-i18n="kpi.lastDone" data-i18n-title="kpi.lastDoneTip">最近完成</span></div>
+      <div class="kpi-val num" id="kPre">—<small>tok/s</small></div>
+      <div class="kpi-foot">
+        <span><span data-i18n="kpi.avg">平均</span> <span class="num" id="kPreAvg">—</span></span>
+        <span class="peak"><span data-i18n="kpi.peak">峰值</span> <span class="num" id="kPrePeak">—</span></span>
+      </div>
+      <div class="spark-empty" id="spPre"></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label"><span data-i18n="kpi.decode">输出速度</span><span class="when" data-i18n="kpi.lastDone" data-i18n-title="kpi.lastDoneTip">最近完成</span></div>
+      <div class="kpi-val num" id="kDec">—<small>tok/s</small></div>
+      <div class="kpi-foot">
+        <span><span data-i18n="kpi.avg">平均</span> <span class="num" id="kDecAvg">—</span></span>
+        <span class="peak"><span data-i18n="kpi.peak">峰值</span> <span class="num" id="kDecPeak">—</span></span>
+      </div>
+      <div class="spark-empty" id="spDec"></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label"><span data-i18n="kpi.engine">引擎</span></div>
+      <div class="kpi-val dim num" id="kVer">—</div>
+      <div class="kpi-note" id="kUpdate">—</div>
+      <div class="kpi-foot">
+        <span id="kEngineState">—</span>
+        <span class="tag" id="kReqTag" hidden><span data-i18n="kpi.req">请求</span> <b id="kReq">0</b></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 分析层：活动类看趋势（sparkline），容量类看水位（进度条） -->
+  <div class="card">
+    <h2><span data-i18n="res.title">系统资源</span> <span class="hint" id="sampleStamp" data-i18n="res.waiting">等待采样…</span></h2>
+    <div class="res" id="res"></div>
+  </div>
+
+  <!-- 请求历史：服务端按每次完成的请求记录一行 -->
+  <div class="card">
+    <h2><span data-i18n="hist.title">完成请求采样</span> <span class="hint" id="rateStamp"></span> <span class="hint" id="histHint"></span></h2>
+    <div class="tblwrap">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th data-i18n="hist.th.time">时间</th>
+            <th data-i18n="hist.th.pt">提示 tokens</th>
+            <th data-i18n="hist.th.ct">生成 tokens</th>
+            <th data-i18n="hist.th.p">预填充 tok/s</th>
+            <th data-i18n="hist.th.d">输出 tok/s</th>
+          </tr>
+        </thead>
+        <tbody id="histBody"><tr><td colspan="5" class="tbl-empty" data-i18n="hist.empty">暂无已完成请求</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+   </div><!-- /左栏 -->
+
+   <div class="det"><!-- 右栏：明细 + 设置与日志 -->
+    <div class="card">
+      <h2 data-i18n="svc.title">模型服务</h2>
+      <div class="kv"><span data-i18n="svc.engine">引擎</span><b id="dEng">—</b></div>
+      <div class="kv"><span data-i18n="svc.model">已加载模型</span><b id="dModel" style="overflow-wrap:anywhere">—</b></div>
+      <div class="kv"><span data-i18n="svc.unit">服务状态</span><b id="dUnit">—</b></div>
+      <div class="kv"><span data-i18n="svc.ready">模型就绪</span><b id="dReady">—</b></div>
+      <div class="kv"><span data-i18n="svc.vision">图像输入</span><b id="dVis">—</b></div>
+      <div class="kv"><span data-i18n="svc.pool">KV 池 / 槽位</span><b id="dPool">—</b></div>
+      <div class="kv"><span data-i18n="svc.uptime">已运行</span><b id="dUp">—</b></div>
+      <div class="kv"><span data-i18n="svc.draft">草稿采纳率</span><b id="dDraft">—</b></div>
+      <div class="kv"><span data-i18n="svc.cache">缓存命中</span><b id="dCache">—</b></div>
+      <div class="kv"><span><span data-i18n="svc.headroom">页缓存余量</span><span class="when" data-i18n="svc.atStartup">启动时</span></span><b id="dHead">—</b></div>
+    </div>
+
+    <div class="card">
+      <h2 data-i18n="set.title">设置与诊断</h2>
+      <div class="setrow">
+        <label class="switch">
+          <input type="checkbox" id="bootToggle">
+          <span class="track"><span class="knob"></span></span>
+          <span style="font-size:13.5px" data-i18n="set.boot">开机自动启动模型</span>
+        </label>
+        <div class="setrow-actions">
+          <button class="btn-sm" id="expStatus" data-i18n="set.expStatus">导出状态快照</button>
+          <button class="btn-sm" id="expLogs" data-i18n="set.expLogs">导出日志</button>
+        </div>
+      </div>
+      <details id="logBox" open>
+        <summary>
+          <span data-i18n="log.title">实时日志</span>
+          <span class="livedot" id="logDot"></span>
+          <span class="tag" id="logMeta" data-i18n="log.loading">加载中…</span>
+        </summary>
+        <div class="logbody">
+          <div class="logtools">
+            <input type="search" id="logFilter" aria-label="过滤日志（区分大小写）" placeholder="过滤日志…（区分大小写）"
+                   autocomplete="off" data-i18n-aria="log.filterAria" data-i18n-ph="log.filterPh">
+            <button class="btn-sm" id="logPause" aria-pressed="false" title="暂停自动刷新，方便阅读"
+                    data-i18n-title="log.pauseTip" data-i18n="log.pause">暂停</button>
+          </div>
+          <pre id="logs" data-i18n="log.loading">加载中…</pre>
+        </div>
+      </details>
+    </div>
+   </div><!-- /右栏 -->
+  </main><!-- /main -->
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* ============================================================
+   主题：跟随系统，可手动覆盖，记住选择
+   ============================================================ */
+(() => {
+  const saved = localStorage.getItem('halogenTheme');
+  const sys = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  document.documentElement.dataset.theme = saved || sys;
+  document.getElementById('themeBtn').onclick = () => {
+    const cur = document.documentElement.dataset.theme;
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem('halogenTheme', next);
+  };
+})();
+
+const $ = id => document.getElementById(id);
+
+/* ============================================================
+   国际化：中英文可切换。
+   静态文本在标记里标 data-i18n（另有 -title / -aria / -ph 三个属性变体），
+   动态文本一律走 t()，切语言时两者一起重绘，不做逐处特判。
+   占位符写成 {name}，用 t(key, {name: value}) 代入。
+   ============================================================ */
+const I18N = {
+  'app.title':        { zh: 'HALOGEN / KYOJIN / STRATA 控制台', en: 'HALOGEN / KYOJIN / STRATA Console' },
+  'state.connecting': { zh: '正在连接…', en: 'Connecting…' },
+  'state.disconnected': { zh: '连接中断', en: 'Disconnected' },
+  'theme.toggle':     { zh: '切换主题', en: 'Toggle theme' },
+  'banner.lost':      { zh: '与控制台服务失去连接，正在重试…',
+                        en: 'Lost connection to the console service, retrying…' },
+
+  'btn.start':      { zh: '启动模型', en: 'Start model' },
+  'btn.stop':       { zh: '停止模型', en: 'Stop model' },
+  'btn.restart':    { zh: '重启模型', en: 'Restart model' },
+  'btn.starting':   { zh: '正在启动…', en: 'Starting…' },
+  'btn.stopping':   { zh: '正在停止…', en: 'Stopping…' },
+  'btn.restarting': { zh: '正在重启…', en: 'Restarting…' },
+
+  'kpi.prefill': { zh: '预填充速度', en: 'Prefill speed' },
+  'kpi.decode':  { zh: '输出速度', en: 'Decode speed' },
+  'kpi.engine':  { zh: '引擎', en: 'Engine' },
+  'kpi.req':     { zh: '请求', en: 'requests' },
+  'kpi.avg':     { zh: '平均', en: 'avg' },
+  'kpi.peak':    { zh: '峰值', en: 'peak' },
+  'kpi.lastDone':{ zh: '最近完成', en: 'last completed' },
+  'kpi.lastDoneTip': { zh: '引擎在请求完成后结算，不提供生成途中的每秒速率',
+                       en: 'The engine settles counters when a request completes; no in-flight per-second rate is available' },
+  'kpi.loading':    { zh: '加载中…', en: 'Loading…' },
+  'kpi.notRunning': { zh: '未运行', en: 'Not running' },
+  'kpi.generating': { zh: '生成中 · {n} 个请求', en: 'Generating · {n} in flight' },
+  'kpi.reqCount':   { zh: '{n} 次请求', en: '{n} requests' },
+
+  'upd.checking':  { zh: '检查更新中…', en: 'Checking for updates…' },
+  'upd.failed':    { zh: '更新检查失败', en: 'Update check failed' },
+  'upd.available': { zh: '有新版本 v{v}', en: 'New version v{v}' },
+  'upd.current':   { zh: '已是最新 v{v}', en: 'Up to date · v{v}' },
+  'upd.upstream':  { zh: '上游最新 v{v}', en: 'Upstream v{v}' },
+  'upd.open':      { zh: '在 GitHub 上查看该版本', en: 'View this release on GitHub' },
+  'upd.tip':       { zh: '对比 GitHub 上 {repo} 的最新标签；每次打开或刷新页面检查一次',
+                     en: 'Compares against the newest tag of {repo} on GitHub; checked once per page load' },
+  'upd.tipNew':    { zh: '升级后必须重新打 serve_api.py 补丁，否则 /health 的 version.match 会变 false',
+                     en: 'After upgrading you must re-apply the serve_api.py patch, or /health version.match turns false' },
+
+  'res.title':   { zh: '系统资源', en: 'System resources' },
+  'res.waiting': { zh: '等待采样…', en: 'Waiting for sample…' },
+  'res.failed':  { zh: '刷新失败，正在重试', en: 'Refresh failed, retrying' },
+  'res.lag':     { zh: '采样延迟 {n} 秒', en: 'Sample lag {n}s' },
+  'res.tick':    { zh: '每秒刷新 · {t}', en: 'Every second · {t}' },
+  'res.cpu':     { zh: 'CPU', en: 'CPU' },
+  'res.gpu':     { zh: 'GPU', en: 'GPU' },
+  'res.npu':     { zh: 'NPU', en: 'NPU' },
+  'res.npuMem':  { zh: '内存 <b>{v}</b> MB', en: 'mem <b>{v}</b> MB' },
+  'res.npuClients': { zh: '<b>{n}</b> 个客户端', en: 'clients <b>{n}</b>' },
+  'res.npuFw':   { zh: '固件 <b>{v}</b>', en: 'fw <b>{v}</b>' },
+  'res.npuOff':  { zh: '未启用', en: 'disabled' },
+  'res.npuHint': { zh: 'amdxdna 未加载', en: 'amdxdna not loaded' },
+  'res.npuTip':  { zh: '利用率 = 各 NPU 客户端在 amdxdna 引擎上的忙碌时间占比（每秒窗口，可超 100% 才封顶）；内存 = 驱动为客户端记的 NPU 侧分配（系统内存）',
+                   en: 'Utilisation = share of wall time the amdxdna engine was busy across clients (1 s window, capped at 100%); memory = NPU-side allocation accounted by the driver (system RAM)' },
+  'res.mem':     { zh: '内存', en: 'Memory' },
+  'res.disk':    { zh: '硬盘', en: 'Disk' },
+  'res.vram':    { zh: '显存 VRAM', en: 'VRAM' },
+  'res.gtt':     { zh: '共享显存 GTT', en: 'Shared GTT' },
+  'res.avgGHz':  { zh: '平均 <b>{v}</b> GHz', en: 'avg <b>{v}</b> GHz' },
+  'res.load':    { zh: '负载 <b>{v}</b>', en: 'load <b>{v}</b>' },
+  'res.power':   { zh: '功耗 <b>{v}</b> W', en: 'power <b>{v}</b> W' },
+  'res.coreClk': { zh: '核心 <b>{v}</b> MHz', en: 'core <b>{v}</b> MHz' },
+  'res.memClk':  { zh: '显存 <b>{v}</b> MHz', en: 'mem clk <b>{v}</b> MHz' },
+  'res.used':    { zh: '占用 <b>{v}%</b>', en: 'used <b>{v}%</b>' },
+  'res.avail':   { zh: '可用 <b>{v}</b> GB', en: 'avail <b>{v}</b> GB' },
+  'res.io':      { zh: '读 {r} · 写 {w} <em>MB/s</em>', en: 'read {r} · write {w} <em>MB/s</em>' },
+  'res.iops':    { zh: 'IOPS <b>{v}</b>', en: 'IOPS <b>{v}</b>' },
+  'res.busy':    { zh: '繁忙 <b>{v}%</b>', en: 'busy <b>{v}%</b>' },
+  'res.capUsed': { zh: '容量已用 <b>{v}%</b>', en: 'capacity used <b>{v}%</b>' },
+  'res.sampling':{ zh: '采样中…', en: 'Sampling…' },
+  'res.unavail': { zh: '不可用', en: 'Unavailable' },
+  'res.vramNote':{ zh: '专用显存 · UMA 切分 <b>{v}</b> GB',
+                   en: 'Dedicated VRAM · UMA carve-out <b>{v}</b> GB' },
+  'res.gttNote': { zh: '共享自系统内存', en: 'Shared from system RAM' },
+
+  'hist.title':   { zh: '完成请求采样', en: 'Completed request samples' },
+  'hist.th.time': { zh: '时间', en: 'Time' },
+  'hist.th.pt':   { zh: '提示 tokens', en: 'Prompt tokens' },
+  'hist.th.ct':   { zh: '生成 tokens', en: 'Output tokens' },
+  'hist.th.p':    { zh: '预填充 tok/s', en: 'Prefill tok/s' },
+  'hist.th.d':    { zh: '输出 tok/s', en: 'Decode tok/s' },
+  'hist.empty':   { zh: '暂无已完成请求', en: 'No completed requests yet' },
+  'hist.hint':    { zh: '最近 {n} 条 / 共 {m} 条', en: 'last {n} of {m}' },
+  'hist.settled': { zh: '速度结算于 {t} · 请求完成后更新',
+                    en: 'Settled at {t} · updates when a request finishes' },
+  'hist.waiting': { zh: '等待请求完成 · 非瞬时速度', en: 'Waiting for a request · not an in-flight rate' },
+  'hist.noRate':  { zh: '速度采集暂不可用', en: 'Rate sampling unavailable' },
+
+  'svc.title':    { zh: '模型服务', en: 'Model service' },
+  'svc.engine':   { zh: '引擎', en: 'Engine' },
+  'svc.model':    { zh: '已加载模型', en: 'Loaded model' },
+  'svc.unit':     { zh: '服务状态', en: 'Service state' },
+  'svc.ready':    { zh: '模型就绪', en: 'Model ready' },
+  'svc.vision':   { zh: '图像输入', en: 'Image input' },
+  'svc.pool':     { zh: '上下文 / 槽位', en: 'Context / slots' },
+  'svc.uptime':   { zh: '已运行', en: 'Uptime' },
+  'svc.draft':    { zh: '草稿采纳率', en: 'Draft accept rate' },
+  'svc.cache':    { zh: '缓存命中', en: 'Cache hit rate' },
+  'svc.headroom': { zh: '页缓存余量', en: 'Page-cache headroom' },
+  'svc.atStartup':{ zh: '启动时', en: 'at startup' },
+  'svc.isReady':  { zh: '就绪', en: 'ready' },
+  'svc.on':       { zh: '已启用', en: 'enabled' },
+  'svc.off':      { zh: '未启用', en: 'disabled' },
+  'svc.headVal':  { zh: '{gib} GiB · {n} 个连续块', en: '{gib} GiB · {n} contiguous blocks' },
+  'unit.active':       { zh: '运行中', en: 'active' },
+  'unit.activating':   { zh: '启动中', en: 'activating' },
+  'unit.deactivating': { zh: '停止中', en: 'deactivating' },
+  'unit.failed':       { zh: '失败', en: 'failed' },
+  'unit.inactive':     { zh: '未运行', en: 'inactive' },
+
+  'set.title':     { zh: '设置与诊断', en: 'Settings & diagnostics' },
+  'set.boot':      { zh: '开机自动启动模型', en: 'Start model at boot' },
+  'set.expStatus': { zh: '导出状态快照', en: 'Export status snapshot' },
+  'set.expLogs':   { zh: '导出日志', en: 'Export logs' },
+
+  'log.title':      { zh: '实时日志', en: 'Live logs' },
+  'log.loading':    { zh: '加载中…', en: 'Loading…' },
+  'log.empty':      { zh: '(暂无日志)', en: '(no logs)' },
+  'log.nomatch':    { zh: '(没有匹配的行)', en: '(no matching lines)' },
+  'log.readFailed': { zh: '读取失败', en: 'Read failed' },
+  'log.filterPh':   { zh: '过滤日志…（区分大小写）', en: 'Filter logs… (case-sensitive)' },
+  'log.filterAria': { zh: '过滤日志（区分大小写）', en: 'Filter logs (case-sensitive)' },
+  'log.pause':      { zh: '暂停', en: 'Pause' },
+  'log.resume':     { zh: '继续', en: 'Resume' },
+  'log.pauseTip':   { zh: '暂停自动刷新，方便阅读', en: 'Pause auto-refresh for easier reading' },
+  'log.meta':       { zh: '{t} · {n} 行', en: '{t} · {n} lines' },
+  'log.filtered':   { zh: '（过滤自 {n} 行）', en: ' (filtered from {n})' },
+  'log.hidden':     { zh: '（已隐藏 {n} 条面板探测）', en: ' ({n} console probes hidden)' },
+
+  'toast.start':   { zh: '已下发：启动模型。加载约需 1 分钟。',
+                     en: 'Sent: start the model. Loading takes about a minute.' },
+  'toast.stop':    { zh: '已下发：停止模型。正在等待服务停止。',
+                     en: 'Sent: stop the model. Waiting for the service to stop.' },
+  'toast.restart': { zh: '已下发：重启模型。加载约需 1 分钟。',
+                     en: 'Sent: restart the model. Loading takes about a minute.' },
+  'toast.fail':    { zh: '{verb}失败：{msg}', en: 'Failed to {verb} the model: {msg}' },
+  'verb.start':    { zh: '启动', en: 'start' },
+  'verb.stop':     { zh: '停止', en: 'stop' },
+  'verb.restart':  { zh: '重启', en: 'restart' },
+  'toast.bootOn':  { zh: '已设为开机自启', en: 'Autostart enabled' },
+  'toast.bootOff': { zh: '已取消开机自启', en: 'Autostart disabled' },
+  'toast.setFail': { zh: '设置失败：{msg}', en: 'Failed to save: {msg}' },
+  'toast.switched': { zh: '已先停止 {from}，正在启动 {to}。加载约需 1–5 分钟。',
+                      en: 'Stopped {from} first; starting {to}. Loading takes 1–5 minutes.' },
+  'toast.loadLong': { zh: '已下发：{verb}模型。加载约需 3–5 分钟。',
+                      en: 'Sent: {verb} the model. Loading takes 3–5 minutes.' },
+  'toast.cpSwitch': { zh: '已先停当前实例，正在用检查点 {m} 启动。加载约需 1 分钟。',
+                      en: 'Stopped the running instance; starting with checkpoint {m}. Loading takes about a minute.' },
+  'toast.bootOnOther': { zh: '已设为开机自启（同时取消了 {k} 的自启，引擎互斥）',
+                         en: 'Autostart enabled (and disabled for {k} — the engines are mutually exclusive)' },
+
+  /* --- 引擎切换 --- */
+  'eng.pick':    { zh: '查看并操作的引擎', en: 'Engine to view and control' },
+  'kv.pick':     { zh: 'kyojin 的模型（启动/重启时生效；两个模型互斥）',
+                   en: 'kyojin model (applies on start/restart; the two are exclusive)' },
+  'kv.running':  { zh: 'kyojin 正在运行：{m}', en: 'kyojin running: {m}' },
+  'kv.pending':  { zh: '已选择 {m}：点"重启模型"才会切换（会先停当前模型）',
+                   en: 'Selected {m}: press Restart to switch (the current model stops first)' },
+  /* --- halogen 检查点（.hgn 文件；与 kyojin 变体同规则，选项来自后端状态） --- */
+  'cp.pick':     { zh: 'halogen 的检查点（启动/重启时生效；同一引擎换 .hgn 文件）',
+                   en: 'halogen checkpoint (applies on start/restart; swaps the .hgn file)' },
+  'cp.running':  { zh: 'halogen 正在运行：{m}', en: 'halogen running: {m}' },
+  'cp.pending':  { zh: '已选择 {m}：点"启动模型"或"重启模型"切换（会先停当前实例）',
+                   en: 'Selected {m}: press Start or Restart to switch (the running instance stops first)' },
+  'cp.v2':           { zh: 'v2（标准）',              en: 'v2 (standard)' },
+  'cp.abliterated':  { zh: 'v2 破限（Quat3rnion）',  en: 'v2 uncensored (Quat3rnion)' },
+  'eng.pickOne': { zh: '查看并操作 {k} · 四个引擎互斥运行（各自要独占本机内存/显存）',
+                   en: 'View and control {k} · the four engines are mutually exclusive (each needs most of the host memory)' },
+  'switch.confirm': {
+    zh: '将先停止 {from}，再启动 {to}。\n\n四个引擎不能同时运行（各自要独占本机内存/显存），启动约需 1 分钟（kyojin 3–5 分钟）。继续？',
+    en: 'This will stop {from} first, then start {to}.\n\nThe four engines cannot run at once (each needs most of the host memory/VRAM); starting takes about a minute (kyojin 3–5 minutes). Continue?' },
+  'upd.noCheck':  { zh: '本地源码构建 · 无版本接口', en: 'Local source build · no version endpoint' },
+  'upd.tipLocal': { zh: '{repo} 由本地源码构建，控制台不做版本检查（升级走 git pull）',
+                    en: '{repo} is built from local source; the console does not check versions (upgrade via git pull)' },
+  /* kyojin 没有版本号：引擎卡显示 git 短提交，这里是对上游默认分支的比对结果 */
+  'upd.commitCurrent': { zh: '已是最新上游', en: 'Up to date with upstream' },
+  'upd.commitBehind':  { zh: '落后上游 {n} 个提交', en: '{n} commits behind upstream' },
+  'upd.commitAhead':   { zh: '本地领先上游 {n} 个提交', en: '{n} commits ahead of upstream' },
+  'upd.commitUnknown': { zh: '上游比对失败', en: 'Upstream compare failed' },
+  'upd.commitOpen':    { zh: '在 GitHub 上查看这些提交', en: 'View these commits on GitHub' },
+  'upd.commitTip':     { zh: '源码构建没有版本号，用 git 提交标识：与 {repo} 的默认分支比对；每次打开或刷新页面检查一次',
+                         en: 'A source build has no version number, so the git commit identifies it: compared with the default branch of {repo}; checked once per page load' },
+  /* strata 自报版本号（0.1.40），但上游标签会落在检出之后，所以更新检查同样按提交比 */
+  'upd.commitTipStrata': { zh: '更新检查把本地 git 提交与 {repo} 的默认分支比对（引擎自报的版本号会滞后于检出）；每次打开或刷新页面检查一次',
+                           en: 'The update check compares the local git commit with the default branch of {repo} (the engine-reported version lags the checkout); checked once per page load' },
+
+  'state.loadingModel': { zh: '正在加载模型…', en: 'Loading model…' },
+  'state.running':      { zh: '运行中 · {v}', en: 'Running · {v}' },
+  'state.inflight':     { zh: ' · {n} 个请求生成中', en: ' · {n} in flight' },
+  'state.startFail':    { zh: '启动失败', en: 'Failed to start' },
+  'state.stopped':      { zh: '已停止', en: 'Stopped' },
+  'state.autostart':    { zh: ' · 已设开机自启', en: ' · autostart on' },
+  'state.alreadyRunning': { zh: '模型已在运行中，无需重复启动', en: 'The model is already running' },
+
+  'up.sec':  { zh: '{n} 秒', en: '{n}s' },
+  'up.min':  { zh: '{m} 分 {s} 秒', en: '{m}m {s}s' },
+  'up.hour': { zh: '{h} 时 {m} 分', en: '{h}h {m}m' },
+
+  'alert.headroom': {
+    zh: '页缓存余量只剩 <b>{gib} GiB</b>，低于引擎要求的 10 GiB。' +
+        '<span class="fix"> 长提示词会从磁盘反复读查找表，prefill 可能从秒变分钟。' +
+        '可调低 HALOGEN_KV_POOL_POSITIONS，或关掉主机上其它吃内存的程序。</span>',
+    en: 'Page-cache headroom is down to <b>{gib} GiB</b>, below the 10 GiB the engine wants.' +
+        '<span class="fix"> Long prompts re-read lookup tables from disk and prefill can go from seconds to minutes. ' +
+        'Lower HALOGEN_KV_POOL_POSITIONS, or free memory on the host.</span>' },
+  'alert.kv':   { zh: 'KV 池占用 <b>{v}%</b>。<span class="fix"> 接近上限时新请求会排队等待。</span>',
+                  en: 'KV pool <b>{v}%</b> full.<span class="fix"> Near the limit, new requests queue up.</span>' },
+  'alert.mem':  { zh: '主机内存已用 <b>{v}%</b>（可用 {a} GB）。',
+                  en: 'Host memory <b>{v}%</b> used ({a} GB available).' },
+  'alert.disk': { zh: '根分区已用 <b>{v}%</b>，剩余 {a} GB。',
+                  en: 'Root filesystem <b>{v}%</b> used, {a} GB left.' },
+};
+
+const LANG_KEY = 'halogenLang';
+let LANG = localStorage.getItem(LANG_KEY) === 'en' ? 'en' : 'zh';
+const loc = () => LANG === 'en' ? 'en-GB' : 'zh-CN';
+
+/* ============================================================
+   引擎选择：面板同时看四个引擎，SEL 是当前查看/操作的那一个。
+   四个引擎各需独占本机大半内存/显存，永远互斥运行——
+   选谁只影响"看谁、操作谁"，真正的互斥由服务端在启动/自启时保证。
+   ============================================================ */
+const ENGINES = {
+  halogen: { label: 'halogen' },
+  /* kyojin 有两个模型变体（各自一个 systemd 单元，同端口、同内存，互斥）：
+     切换 = 停当前变体 → 等内存 → 起目标变体（由服务端保证）。 */
+  kyojin:  { label: 'kyojin', variants: [
+    { key: 'glm',  label: 'GLM-5.3-Flash' },
+    { key: 'qwen', label: 'Qwen3.8-Flash-Next' }] },
+  strata:  { label: 'strata' },
+  /* gsqhalo：podman 容器（GSQHalo.cpp），源码构建无版本号 → 显示 git 短提交 */
+  gsqhalo: { label: 'gsqhalo' },
+};
+const ENG_KEY = 'halogenEngineSel';
+const savedEng = localStorage.getItem(ENG_KEY);
+let SEL = ENGINES[savedEng] ? savedEng : 'halogen';
+/* 用户没显式选过时，首次状态刷新会自动跟随"正在运行"的那个引擎；
+   一旦点过药丸（或已跟随过）就固定下来，不再自动切走。 */
+let selPinned = !!ENGINES[savedEng];
+
+/* kyojin 的模型子选择：同一套"跟随但点过就固定"规则——没显式选过时跟随正在
+   跑的变体，选过之后不再自动切。选择记在 localStorage，跨刷新保留。 */
+const KVAR_KEY = 'halogenKyojinVariant';
+const variantsOf = k => (ENGINES[k] && ENGINES[k].variants) || [];
+const savedVar = localStorage.getItem(KVAR_KEY);
+let KVAR = variantsOf('kyojin').some(v => v.key === savedVar) ? savedVar : 'glm';
+let kvarPinned = !!savedVar;
+function variantLabel(k) {
+  const v = variantsOf(SEL).find(x => x.key === k);
+  return v ? v.label : k;
+}
+
+/* halogen 的检查点子选择（.hgn 文件，破限/标准）：与 kyojin 变体同一套规则——
+   没显式选过时跟随正在跑的实例（停了则跟随单元文件=下次启动会用的那个），
+   点过就固定。选项来自后端状态 d.checkpoints（服务端注册表是唯一事实源）。 */
+const CPV_KEY = 'halogenCheckpoint';
+let CPV = localStorage.getItem(CPV_KEY) || null;
+let cpvPinned = !!localStorage.getItem(CPV_KEY);
+function cpLabel(k) {
+  if (!k) return '—';
+  return I18N['cp.' + k] ? t('cp.' + k) : k;
+}
+
+const api = path => path + (path.includes('?') ? '&' : '?') + 'engine=' + SEL
+  + (variantsOf(SEL).length ? '&variant=' + encodeURIComponent(KVAR) : '');
+
+function t(key, params) {
+  const entry = I18N[key];
+  let s = entry ? (entry[LANG] != null ? entry[LANG] : entry.zh) : key;
+  if (params) for (const k in params) s = s.split('{' + k + '}').join(params[k]);
+  return s;
+}
+
+/* 缺翻译的枚举值（如 systemd 冒出个没见过的状态）原样显示，不显示键名 */
+const unitLabel = s => !s ? '—' : (I18N['unit.' + s] ? t('unit.' + s) : s);
+
+/* 把静态标记刷成当前语言。动态部分由各自的 render* 负责。 */
+function applyStatic() {
+  document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
+  document.title = t('app.title');
+  for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
+  for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
+  for (const el of document.querySelectorAll('[data-i18n-aria]')) el.setAttribute('aria-label', t(el.dataset.i18nAria));
+  for (const el of document.querySelectorAll('[data-i18n-ph]')) el.placeholder = t(el.dataset.i18nPh);
+  const lb = $('langBtn');
+  lb.textContent = LANG === 'en' ? '中' : 'EN';
+  lb.title = LANG === 'en' ? '切换到中文' : 'Switch to English';
+  syncPauseBtn();
+}
+
+/* ------------------------------------------------------------
+   sparkline：32px 内的折线 + 淡填充。
+   百分比类固定 0–100 以便横向可比；速率类按自身峰值归一，
+   只表达形状不表达绝对值（这是 sparkline 的正确用法）。
+   ------------------------------------------------------------ */
+function spark(values, colorClass, fixedMax) {
+  const v = (values || []).filter(x => typeof x === 'number' && isFinite(x));
+  if (v.length < 2) return '';
+  const W = 100, H = 30;
+  const max = fixedMax != null ? fixedMax : Math.max(...v);
+  const min = fixedMax != null ? 0 : Math.min(...v);
+  const span = Math.max(max - min, 1e-6);
+  const x = i => (i / (v.length - 1)) * W;
+  const y = p => H - ((Math.max(min, Math.min(max, p)) - min) / span) * H;
+  const d = v.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(2)},${y(p).toFixed(2)}`).join(' ');
+  return `<svg class="spark ${colorClass}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <path class="spark-area" d="${d} L${W},${H} L0,${H} Z"></path>
+    <path class="spark-line" d="${d}"></path></svg>`;
+}
+
+function toast(text, ok) {
+  const t = $('toast');
+  t.textContent = text;
+  t.className = 'toast show' + (ok ? '' : ' bad');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.className = 'toast'; }, 3600);
+}
+
+const fmtUp = s => s == null ? '—' :
+  (s < 60 ? t('up.sec', { n: s })
+   : s < 3600 ? t('up.min', { m: Math.floor(s / 60), s: s % 60 })
+   : t('up.hour', { h: Math.floor(s / 3600), m: Math.floor(s % 3600 / 60) }));
+const pct = (v, d = 1) => v == null ? '—' : v.toFixed(d);
+const barClass = p => p == null ? '' : p >= 90 ? 'danger' : p >= 75 ? 'warn' : '';
+
+/* ------------------------------------------------------------
+   资源层渲染
+   ------------------------------------------------------------ */
+function resRow(o) {
+  // o: {label, value, sub, barPct, spark, sparkClass, tags, title}
+  const bar = o.barPct != null
+    ? `<div class="bar"><i class="${barClass(o.barPct)}" style="width:${Math.min(100, o.barPct)}%"></i></div>`
+    : (o.spark || '');
+  const tags = (o.tags || []).length
+    ? `<div class="tags">${o.tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>` : '';
+  return `<div class="res-item"${o.title ? ` title="${o.title}"` : ''}>
+    <div class="res-head"><span class="res-label">${o.label}</span><span class="res-val">${o.value}</span></div>
+    ${bar}${tags}</div>`;
+}
+
+function renderRes(sys, hist) {
+  const h = hist || {};
+  const cpu = sys.cpu || {}, mem = sys.mem || {}, disk = sys.disk, gpu = sys.gpu;
+  const rows = [];
+
+  rows.push(resRow({
+    label: t('res.cpu'),
+    value: `${pct(cpu.percent)}%` + (cpu.temp_c != null ? ` <em>${cpu.temp_c}°C</em>` : ''),
+    spark: spark(h.cpu, 'c-cpu', 100),
+    tags: [
+      cpu.freq_mhz != null ? t('res.avgGHz', { v: (cpu.freq_mhz / 1000).toFixed(2) }) : '',
+      cpu.load1 != null ? t('res.load', { v: cpu.load1 }) : '',
+    ].filter(Boolean),
+  }));
+
+  if (gpu) {
+    rows.push(resRow({
+      label: t('res.gpu'),
+      value: `${pct(gpu.busy, 0)}%` + (gpu.temp_c != null ? ` <em>${gpu.temp_c}°C</em>` : ''),
+      spark: spark(h.gpu, 'c-gpu', 100),
+      tags: [
+        gpu.power_w != null ? t('res.power', { v: gpu.power_w }) : '',
+        gpu.sclk_mhz != null ? t('res.coreClk', { v: gpu.sclk_mhz }) : '',
+        gpu.fclk_mhz != null ? t('res.memClk', { v: gpu.fclk_mhz }) : '',
+      ].filter(Boolean),
+    }));
+  }
+
+  // NPU：利用率口径与 GPU busy% 同源（amdxdna 记在客户端 fdinfo 的引擎忙碌时间），
+  // 拿不到读数也没有 sysfs，全靠服务端两次采样求差 —— 这里只负责画。
+  const npu = sys.npu;
+  if (npu) {
+    rows.push(npu.present ? resRow({
+      label: t('res.npu'),
+      value: `${pct(npu.busy, 0)}%`,
+      spark: spark(h.npu, 'c-npu', 100),
+      title: t('res.npuTip'),
+      tags: [
+        npu.mem_mb != null ? t('res.npuMem', { v: pct(npu.mem_mb, 0) }) : '',
+        npu.clients != null ? t('res.npuClients', { n: npu.clients }) : '',
+        npu.fw ? t('res.npuFw', { v: npu.fw }) : '',
+      ].filter(Boolean),
+    }) : resRow({
+      label: t('res.npu'),
+      value: t('res.npuOff'),
+      spark: '',
+      tags: [t('res.npuHint')],
+    }));
+  }
+
+  rows.push(resRow({
+    label: t('res.mem'),
+    value: `${pct(mem.used_gb)} / ${pct(mem.total_gb)} <em>GB</em>`,
+    barPct: mem.percent,
+    tags: [
+      t('res.used', { v: pct(mem.percent) }),
+      t('res.avail', { v: pct(mem.avail_gb) }),
+      mem.swap_used_gb ? `Swap <b>${pct(mem.swap_used_gb)}</b> GB` : 'Swap <b>0</b>',
+    ],
+  }));
+
+  // 硬盘按"活动类"呈现：主轴是实时读写吞吐（模型读查找表时这里会明显抬头），
+  // 容量降级成一个标签，仍然可见但不再占据主轴。
+  const dio = sys.disk_io;
+  if (dio && dio.read_mbs != null) {
+    rows.push(resRow({
+      label: t('res.disk'),
+      value: t('res.io', { r: pct(dio.read_mbs, 2), w: pct(dio.write_mbs, 2) }),
+      spark: spark(h.disk, 'c-disk'),
+      tags: [
+        t('res.iops', { v: dio.iops }),
+        t('res.busy', { v: pct(dio.util_pct) }),
+        disk ? t('res.capUsed', { v: pct(disk.percent) }) : '',
+      ].filter(Boolean),
+    }));
+  } else if (dio || disk) {
+    rows.push(resRow({
+      label: t('res.disk'),
+      value: dio ? t('res.sampling') : t('res.unavail'),
+      spark: '',
+      tags: disk ? [t('res.capUsed', { v: pct(disk.percent) }),
+                    t('res.avail', { v: pct(disk.avail_gb) })] : [],
+    }));
+  }
+
+  if (gpu) {
+    const v = gpu.vram || {}, g = gpu.gtt || {};
+    rows.push(resRow({
+      label: t('res.vram'),
+      value: `${pct(v.used_gb, 2)} / ${pct(v.total_gb, 2)} <em>GB</em>`,
+      barPct: v.percent,
+      // 进度条已表达"已用%"，标签改为说明这块显存本身的来源，不再重复百分比
+      tags: [t('res.vramNote', { v: pct(v.total_gb, 2) })],
+    }));
+    rows.push(resRow({
+      label: t('res.gtt'),
+      value: `${pct(g.used_gb)} / ${pct(g.total_gb)} <em>GB</em>`,
+      barPct: g.percent,
+      tags: [
+        t('res.gttNote'),
+        t('res.avail', { v: pct((g.total_gb || 0) - (g.used_gb || 0)) }),
+      ],
+    }));
+  }
+
+  $('res').innerHTML = rows.join('');
+}
+
+/* ------------------------------------------------------------
+   主刷新
+   ------------------------------------------------------------ */
+let failCount = 0;
+
+/* ------------------------------------------------------------
+   上游版本检查：只在打开/刷新页面时问一次服务端
+   （服务端自己缓存 GitHub 查询），之后每秒的重绘只画已存结果。
+   渲染里带签名去重，否则每秒重建一次 <a> 会把点击吃掉。
+   ------------------------------------------------------------ */
+let updateState = { phase: 'checking' };
+let updateRendered = '';
+
+const verText = s => String(s == null ? '' : s).replace(/^v/i, '');
+
+function renderUpdate() {
+  const el = $('kUpdate'), u = updateState;
+  const sig = [LANG, u.phase, u.kind, u.local, u.latest, u.update_available,
+               u.behind_by, u.ahead_by, u.error, u.supported].join('|');
+  if (sig === updateRendered) return;
+  updateRendered = sig;
+
+  el.className = 'kpi-note';
+  el.removeAttribute('title');
+  const repo = u.repo || '';
+
+  if (u.phase === 'checking') { el.textContent = t('upd.checking'); return; }
+  if (u.phase === 'failed') {
+    el.textContent = t('upd.failed');
+    if (u.error) el.title = u.error;
+    return;
+  }
+  // kyojin / strata：源码构建，跟上游默认分支比 git 提交（strata 另自报版本号）
+  if (u.kind === 'commit') {
+    const tipKey = u.engine === 'strata' ? 'upd.commitTipStrata' : 'upd.commitTip';
+    if (!u.supported || !u.local) {
+      el.textContent = t('upd.noCheck');
+      if (u.error) el.title = u.error;
+      return;
+    }
+    if (u.error || u.behind_by == null) {
+      el.textContent = t('upd.commitUnknown');
+      el.title = (u.error ? u.error + ' · ' : '') + t(tipKey, { repo });
+      return;
+    }
+    if (u.update_available) {
+      el.innerHTML = t('upd.commitBehind', { n: u.behind_by }) +
+        ` <a href="${u.compare_url || ('https://github.com/' + repo)}" target="_blank"`
+        + ` rel="noopener" title="${t('upd.commitOpen')}">↗</a>`;
+      el.classList.add('upd-new');
+    } else if (u.ahead_by) {
+      el.textContent = t('upd.commitAhead', { n: u.ahead_by });
+    } else {
+      el.textContent = t('upd.commitCurrent');
+    }
+    el.title = t(tipKey, { repo });
+    return;
+  }
+  if (u.supported === false) {          // 其它没有版本接口的本地构建
+    el.textContent = t('upd.noCheck');
+    el.title = t('upd.tipLocal', { repo });
+    return;
+  }
+  if (!u.local) {                       // 引擎没起来：无从比较，只报上游最新
+    el.textContent = t('upd.upstream', { v: verText(u.latest) || '?' });
+    el.title = t('upd.tip', { repo });
+    return;
+  }
+  if (u.update_available) {
+    el.innerHTML = t('upd.available', { v: verText(u.latest) }) +
+      ` <a href="https://github.com/${repo}/tags" target="_blank" rel="noopener"`
+      + ` title="${t('upd.open')}">↗</a>`;
+    el.classList.add('upd-new');
+    el.title = t('upd.tipNew');
+  } else {
+    el.textContent = t('upd.current', { v: verText(u.local) });
+    el.title = t('upd.tip', { repo });
+  }
+}
+
+async function checkUpdate() {
+  try {
+    const d = await getJson(api('/api/update'));
+    updateState = d.error ? { phase: 'failed', error: d.error, ...d } : { phase: 'done', ...d };
+  } catch (e) {
+    updateState = { phase: 'failed', error: e.message };
+  }
+  renderUpdate();
+}
+
+function renderKpis(d) {
+  const m = d.metrics, hist = (d.history && d.history.rates) || [];
+  // 引擎卡片的主值：halogen 显示引擎自报版本号；kyojin/gsqhalo 是源码构建、显示 git 短提交号
+  const key = d.engine_key || SEL;
+  const head = (d.engine && d.engine.head)
+    || (updateState.kind === 'commit' ? updateState.local : null);
+  const srcBuild = key === 'kyojin' || key === 'gsqhalo';
+  const verStr = srcBuild ? (head || key)
+    : (d.engine && d.engine.version ? 'v' + d.engine.version : '—');
+  $('kVer').textContent = (srcBuild || (m && m.requests_total != null)) ? verStr : '—';
+  if (!m) {
+    $('kPre').innerHTML = '—<small>tok/s</small>';
+    $('kDec').innerHTML = '—<small>tok/s</small>';
+    $('kPreAvg').textContent = $('kDecAvg').textContent = '—';
+    $('kPrePeak').textContent = $('kDecPeak').textContent = '—';
+    $('spPre').innerHTML = '';
+    $('spDec').innerHTML = '';
+    renderUpdate();
+    $('kEngineState').textContent = d.unit.active === 'active' ? t('kpi.loading') : t('kpi.notRunning');
+    $('kReqTag').hidden = true;
+    return;
+  }
+  $('kPre').innerHTML = (m.prefill_now == null ? '—' : m.prefill_now.toFixed(1)) + '<small>tok/s</small>';
+  $('kDec').innerHTML = (m.decode_now == null ? '—' : m.decode_now.toFixed(1)) + '<small>tok/s</small>';
+  $('kPreAvg').textContent = m.prefill_avg == null ? '—' : m.prefill_avg.toFixed(1);
+  $('kDecAvg').textContent = m.decode_avg == null ? '—' : m.decode_avg.toFixed(1);
+  $('kPrePeak').textContent = m.prefill_peak == null ? '—' : m.prefill_peak.toFixed(1);
+  $('kDecPeak').textContent = m.decode_peak == null ? '—' : m.decode_peak.toFixed(1);
+
+  const busy = (m.processing || 0) > 0;
+  renderUpdate();
+  // requests_total 为 null 的引擎（gsqhalo 的 llama.cpp 不暴露请求计数）不硬凑 0
+  $('kEngineState').innerHTML = busy
+    ? `<span class="dot load" style="display:inline-block;vertical-align:middle;margin-right:6px"></span>${t('kpi.generating', { n: m.processing })}`
+    : `<span class="dot on" style="display:inline-block;vertical-align:middle;margin-right:6px"></span>`
+      + (m.requests_total == null ? t('svc.isReady')
+                                  : t('kpi.reqCount', { n: m.requests_total || 0 }));
+
+  // 吞吐趋势：把每次完成的请求画成两条 sparkline
+  const sp = hist.filter(r => r.p != null).map(r => r.p);
+  const sd = hist.filter(r => r.d != null).map(r => r.d);
+  const e1 = $('spPre'), e2 = $('spDec');
+  const h1 = sp.length >= 2 ? spark(sp, 'c-cpu') : '';
+  const h2 = sd.length >= 2 ? spark(sd, 'c-ok') : '';
+  e1.innerHTML = h1;
+  e2.innerHTML = h2;
+}
+
+function renderDetail(d) {
+  const u = d.unit || {}, e = d.engine || {}, m = d.metrics;
+  const key = d.engine_key || SEL;
+  $('dEng').textContent = (ENGINES[key] ? ENGINES[key].label : key)
+    + (e.model ? ' · ' + e.model : '');
+  $('dModel').textContent = e.model || '—';
+  $('dUnit').textContent = unitLabel(u.active);
+  $('dReady').textContent = e.ready ? t('svc.isReady') : (e.status || '—');
+  $('dVis').textContent = e.vision == null ? '—' : (e.vision ? t('svc.on') : t('svc.off'));
+  // halogen：KV 池位置 / 槽位数；kyojin：/slots 里的上下文窗口（无槽位概念）
+  $('dPool').textContent = e.kv_pool
+    ? (e.slots ? `${e.kv_pool} / ${e.slots}` : String(e.kv_pool)) : '—';
+  $('dUp').textContent = fmtUp(u.uptime_s);
+  // 这两个率只有采集到它们的那台引擎才有意义，串台时宁可不显示
+  const mine = m && (!m.engine || m.engine === key) ? m : null;
+  $('dDraft').textContent = mine && mine.draft_accept_pct != null ? mine.draft_accept_pct.toFixed(1) + '%' : '—';
+  $('dCache').textContent = mine && mine.cache_hit_pct != null ? mine.cache_hit_pct.toFixed(1) + '%' : '—';
+  if (!$('bootToggle').disabled) $('bootToggle').checked = (u.enabled === 'enabled');
+
+  // 页缓存余量：本机最关键的健康指标，halogen 独有（kyojin 没有这个探测）
+  const hr = d.headroom, hb = $('dHead');
+  if (hr && hr.gib != null) {
+    hb.textContent = t('svc.headVal', { gib: hr.gib.toFixed(1), n: hr.blocks });
+    hb.style.color = hr.gib < 8 ? 'var(--danger)' : hr.gib < 10 ? 'var(--warn)' : '';
+  } else {
+    hb.textContent = '—';
+    hb.style.color = '';
+  }
+
+  /* 顶栏状态灯描述"正在运行的那个引擎"——它可能与药丸里选中的不同
+     （比如选中 halogen 查看时 kyojin 在跑），名字写在前面避免误读。 */
+  const active = d.active_engine;
+  const au = active && d.units ? d.units[active] : null;
+  const ae = active && d.engine_states ? (d.engine_states[active] || {}) : null;
+  const nm = active ? (ENGINES[active] ? ENGINES[active].label : active) : '';
+  let cls = 'dot', text;
+  if (active && au) {
+    const inflight = (m && m.processing) || (ae && ae.busy ? 1 : 0);
+    if (au.active === 'activating' || (au.active === 'active' && ae && !ae.ready)) {
+      cls += ' load'; text = `${nm} · ${t('state.loadingModel')}`;
+    } else if (au.active === 'active' && ae && ae.ready) {
+      cls += ' on'; text = `${nm} · ` + t('state.running', { v: ae.version || ae.model || '?' })
+        + (inflight ? t('state.inflight', { n: inflight }) : '');
+    } else if (au.active === 'failed') {
+      cls += ' err'; text = `${nm} · ${t('state.startFail')}`;
+    } else if (au.active === 'deactivating') {
+      cls += ' load'; text = `${nm} · ${t('unit.deactivating')}`;
+    } else { text = t('state.stopped'); }
+  } else { text = t('state.stopped'); }
+  $('dot').className = cls;
+  const autostart = au ? au.enabled === 'enabled' : u.enabled === 'enabled';
+  $('stateText').textContent = text + (autostart ? t('state.autostart') : '');
+
+  const starting = (u.active === 'active' || u.active === 'activating');
+  $('bStart').disabled = starting;
+  $('bStart').title = starting ? t('state.alreadyRunning') : '';
+  $('bRestart').disabled = (u.active !== 'active');
+  $('bStop').disabled = (u.active !== 'active' && u.active !== 'activating' && u.active !== 'failed');
+  if (actionPending) for (const id of ['bStart', 'bRestart', 'bStop']) $(id).disabled = true;
+}
+
+/* ------------------------------------------------------------
+   引擎切换：药丸只改"看谁/操作谁"，不启停任何东西。
+   启动/重启时服务端会先停另一个引擎（互斥由它保证）。
+   ------------------------------------------------------------ */
+function renderEnginePills(d) {
+  const units = (d && d.units) || {};
+  for (const key of Object.keys(ENGINES)) {
+    const b = $('engBtn-' + key);
+    b.classList.toggle('on', key === SEL);
+    // 正在跑的引擎带绿点：选中另一个看时，一眼知道"活的是谁"
+    const u = units[key] || {};
+    b.classList.toggle('live', u.active === 'active' || u.active === 'activating');
+    b.title = t('eng.pickOne', { k: ENGINES[key].label });
+  }
+}
+
+function switchEngine(key) {
+  if (key === SEL || actionPending) return;
+  SEL = key;
+  selPinned = true;
+  localStorage.setItem(ENG_KEY, SEL);
+  // 立刻丢掉旧引擎的详情，避免新引擎的卡片里残留上一个的数字
+  S.unit = {}; S.engine = {}; S.engine_key = key;
+  S.variant = null; S.variants = {};
+  S.checkpoints = {}; S.checkpoint = null; S.checkpoint_running = null;
+  updateRendered = ''; updateState = { phase: 'checking' };
+  renderEnginePills(S);
+  renderVariantSelect(S);
+  renderCheckpointSelect(S);
+  renderDetail(S);
+  renderUpdate();
+  checkUpdate();
+  refreshSlow(); refreshFast(); loadLogs();
+}
+for (const key of Object.keys(ENGINES)) {
+  $('engBtn-' + key).onclick = () => switchEngine(key);
+}
+
+/* ------------------------------------------------------------
+   kyojin 模型子选择：只改"启动/重启哪个变体"，不主动启停任何东西；
+   在跑的变体自动选中并跟随状态刷新（用户点过就固定，不再跟随）。
+   ------------------------------------------------------------ */
+function renderVariantSelect(d) {
+  const sel = $('kVariant');
+  const vars = variantsOf(SEL);
+  sel.hidden = !vars.length;
+  if (!vars.length) return;
+  if (sel.dataset.eng !== SEL) {         // 选项只在引擎切换时重建，别打断展开中的下拉
+    sel.dataset.eng = SEL;
+    sel.innerHTML = vars.map(v => '<option value="' + v.key + '">' + v.label + '</option>').join('');
+  }
+  const running = vars.find(v => v.key === ((d && d.variant) || '')) || null;
+  if (running && !kvarPinned) KVAR = running.key;
+  sel.value = KVAR;
+  sel.title = running ? t('kv.running', { m: running.label }) : t('kv.pick');
+}
+$('kVariant').onchange = (ev) => {
+  KVAR = ev.target.value;
+  kvarPinned = true;
+  localStorage.setItem(KVAR_KEY, KVAR);
+  renderVariantSelect(S);
+  // 选中和在跑的不一致时提醒一句：切换要按"重启模型"（会先停掉当前模型）
+  const running = SEL === 'kyojin' ? (S.variant || null) : null;
+  if (running && running !== KVAR) toast(t('kv.pending', { m: variantLabel(KVAR) }), true);
+};
+
+/* ------------------------------------------------------------
+   halogen 检查点子选择：只改"启动/重启用哪个 .hgn 文件"，不主动启停；
+   在跑的实例自动选中并跟随（用户点过就固定），停着时跟随单元文件。
+   ------------------------------------------------------------ */
+function renderCheckpointSelect(d) {
+  const sel = $('hCheckpoint');
+  const keys = Object.keys((d && d.checkpoints) || {});
+  sel.hidden = !keys.length;
+  if (!keys.length) return;
+  // 选项在引擎/语言切换时重建（语言决定标签文案）；别打断展开中的下拉
+  const sig = SEL + '/' + LANG;
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig;
+    sel.innerHTML = keys.map(k => '<option value="' + k + '">' + cpLabel(k) + '</option>').join('');
+  }
+  const running = (d && d.checkpoint_running) || null;
+  const file = (d && d.checkpoint) || null;
+  const shown = keys.includes(running) ? running : (keys.includes(file) ? file : keys[0]);
+  if (!cpvPinned || !keys.includes(CPV)) CPV = shown;
+  sel.value = CPV;
+  sel.title = running ? t('cp.running', { m: cpLabel(running) }) : t('cp.pick');
+}
+$('hCheckpoint').onchange = (ev) => {
+  CPV = ev.target.value;
+  cpvPinned = true;
+  localStorage.setItem(CPV_KEY, CPV);
+  renderCheckpointSelect(S);
+  // 与在跑的实例不一致时提醒：切换要按"启动模型"或"重启模型"（都会先停当前实例）
+  const running = (S && S.checkpoint_running) || null;
+  if (running && running !== CPV) toast(t('cp.pending', { m: cpLabel(CPV) }), true);
+};
+
+/* ------------------------------------------------------------
+   告警：只在阈值越界时出现，正常时这块 DOM 是空的、不占高度
+   ------------------------------------------------------------ */
+function renderAlerts(d) {
+  const out = [];
+  const hr = d.headroom;
+  if (hr && hr.gib != null && hr.gib < 10) {
+    out.push({
+      crit: hr.gib < 8,
+      html: t('alert.headroom', { gib: hr.gib.toFixed(1) }),
+    });
+  }
+  const kv = (d.metrics || {}).kv_ratio_pct;
+  if (kv != null && kv >= 90) {
+    out.push({ crit: kv >= 97, html: t('alert.kv', { v: kv.toFixed(1) }) });
+  }
+  const mem = (d.sys || {}).mem;
+  if (mem && mem.percent >= 92) {
+    out.push({ crit: mem.percent >= 96,
+      html: t('alert.mem', { v: mem.percent.toFixed(1), a: mem.avail_gb }) });
+  }
+  const disk = (d.sys || {}).disk;
+  if (disk && disk.percent >= 90) {
+    out.push({ crit: disk.percent >= 95,
+      html: t('alert.disk', { v: disk.percent.toFixed(1), a: disk.avail_gb }) });
+  }
+  $('alerts').innerHTML = out.map(a =>
+    `<div class="alert${a.crit ? ' crit' : ''}"><span class="dot ${a.crit ? 'err' : 'warn'}"></span>` +
+    `<div>${a.html}</div></div>`).join('');
+}
+
+/* ------------------------------------------------------------
+   请求历史：每个完成的请求一行，取最近 30 条
+   ------------------------------------------------------------ */
+function renderHistory(d) {
+  const rs = ((d.history || {}).rates) || [];
+  $('histHint').textContent = rs.length
+    ? t('hist.hint', { n: Math.min(rs.length, 30), m: rs.length }) : '';
+  const body = $('histBody');
+  if (!rs.length) {
+    body.innerHTML = `<tr><td colspan="5" class="tbl-empty">${t('hist.empty')}</td></tr>`;
+    return;
+  }
+  const f = v => v == null ? '—' : v.toFixed(1);
+  body.innerHTML = rs.slice(-30).reverse().map(r => {
+    const clock = new Date(r.t * 1000).toLocaleTimeString(loc(), { hour12: false });
+    return `<tr><td class="mono">${clock}</td><td>${r.pt ?? '—'}</td><td>${r.ct ?? '—'}</td>` +
+           `<td class="mono">${f(r.p)}</td><td class="mono">${f(r.d)}</td></tr>`;
+  }).join('');
+}
+
+/* 两条刷新通道共享的状态：快速通道填 sys/metrics/history，
+   慢通道填 unit/engine/headroom 等结构字段，渲染函数统一读这个合并对象。 */
+const S = { unit: {}, engine: {}, metrics: null, sys: {}, history: { sys: {}, rates: [] } };
+
+/* 快速通道（1 秒）：只画会实时变的系统资源与速度数字。
+   失败不打断——连接中断由慢通道负责显示横幅。 */
+let fastBusy = false, slowBusy = false;
+async function getJson(path) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const r = await fetch(path, {cache: 'no-store', signal: controller.signal});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(timer); }
+}
+async function refreshFast() {
+  if (fastBusy) return;
+  fastBusy = true;
+  try {
+    const q = await getJson('/api/quick');
+    Object.assign(S, {sys: q.sys || {}, metrics: q.metrics, history: q.history || S.history});
+    // 独立渲染，速度卡片异常不应中断系统资源更新。
+    renderRes(S.sys, S.history && S.history.sys);
+    const age = Date.now() / 1000 - q.ts;
+    $('sampleStamp').textContent = age < 3
+      ? t('res.tick', { t: new Date(q.ts * 1000).toLocaleTimeString(loc()) })
+      : t('res.lag', { n: Math.max(0, Math.floor(age)) });
+    renderKpis(S);
+    // 速度来自"正在跑的那个引擎"，选中的是另一个时把来源写在时间戳前面
+    const at = q.metrics && q.metrics.measured_at;
+    const src = q.metrics_engine && q.metrics_engine !== SEL ? q.metrics_engine + ' · ' : '';
+    $('rateStamp').textContent = !q.metrics_ok ? t('hist.noRate')
+      : at ? src + t('hist.settled', { t: new Date(at * 1000).toLocaleTimeString(loc()) })
+      : src + t('hist.waiting');
+  } catch (e) {
+    $('sampleStamp').textContent = t('res.failed');
+    console.error('快速刷新失败', e);
+  } finally { fastBusy = false; }
+}
+
+async function refreshSlow() {
+  if (slowBusy) return;
+  slowBusy = true;
+  try {
+    const d = await getJson(api('/api/status'));
+    if (failCount) { failCount = 0; $('banner').classList.remove('show'); }
+    // 没选过引擎的访客：跟随正在运行的那个，省得先看到一张"已停止"的卡片
+    if (!selPinned && d.active_engine && d.active_engine !== SEL) {
+      SEL = d.active_engine;
+      selPinned = true;
+      updateRendered = ''; updateState = { phase: 'checking' };
+      renderUpdate(); checkUpdate(); loadLogs();
+      slowBusy = false;              // 本轮数据属于旧引擎，丢弃后立刻用新引擎重取
+      return refreshSlow();
+    }
+    // 慢响应不得覆盖快速通道已经更新的资源、速度和历史。
+    Object.assign(S, { unit: d.unit, engine: d.engine, headroom: d.headroom,
+                       engine_key: d.engine_key, units: d.units,
+                       variant: d.variant, variants: d.variants,
+                       checkpoint: d.checkpoint, checkpoints: d.checkpoints,
+                       checkpoint_running: d.checkpoint_running,
+                       active_engine: d.active_engine, engine_states: d.engine_states });
+    renderEnginePills(S);
+    renderVariantSelect(S);
+    renderCheckpointSelect(S);
+    renderDetail(S);
+    renderAlerts(S);
+    renderHistory(S);
+  } catch (err) {
+    console.error('状态刷新失败', err);
+    if (++failCount >= 2) {
+      $('banner').classList.add('show');
+      $('stateText').textContent = t('state.disconnected');
+      $('dot').className = 'dot err';
+    }
+  } finally { slowBusy = false; }
+}
+
+async function post(path, body) {
+  const r = await fetch(path, {
+    method: 'POST',
+    // X-Lang 告诉服务端用哪种语言回报错信息（toast 里会原样显示）
+    headers: { 'Content-Type': 'application/json', 'X-Lang': LANG },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json();
+  if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+let actionPending = false;
+for (const a of ['start', 'stop', 'restart']) {
+  const btnId = 'b' + a[0].toUpperCase() + a.slice(1);
+  $(btnId).onclick = async () => {
+    if (actionPending) return;
+    // 启动/重启会把在跑的其它引擎（或 kyojin 的另一个模型变体）先停掉——先问一句
+    const from = [];
+    for (const k of Object.keys(ENGINES)) {
+      if (k === SEL) continue;
+      const ou = (S.units || {})[k] || {};
+      if (ou.active === 'active' || ou.active === 'activating') from.push(ENGINES[k].label);
+    }
+    const runningVar = SEL === 'kyojin' ? (S.variant || null) : null;
+    if (runningVar && runningVar !== KVAR) from.push(variantLabel(runningVar));
+    /* halogen：选了与在跑不同的检查点 → 启动/重启都会先停当前实例换 .hgn 文件 */
+    const cpKeys = Object.keys((S && S.checkpoints) || {});
+    const runningCp = (S && S.checkpoint_running) || null;
+    if (cpKeys.length && runningCp && runningCp !== CPV) from.push(cpLabel(runningCp));
+    const toName = variantsOf(SEL).length ? variantLabel(KVAR)
+                 : (cpKeys.length ? cpLabel(CPV) : SEL);
+    if ((a === 'start' || a === 'restart') && from.length &&
+        !confirm(t('switch.confirm', { from: from.join(', '), to: toName }))) return;
+    actionPending = true;
+    renderDetail(S);
+    const button = $(btnId);
+    button.textContent = t('btn.' + a + 'ing');
+    try {
+      // 停止不带变体/检查点：服务端把该引擎的所有变体单元都停掉（"停止模型"就是停这个引擎）
+      const r = await post('/api/action', Object.assign({ action: a, engine: SEL },
+                                                        a === 'stop' ? {} : { variant: KVAR, checkpoint: CPV }));
+      const stopped = [...(r.stopped_others || []).map(k => (ENGINES[k] || {}).label || k),
+                       r.stopped_variant].filter(Boolean).join(', ');
+      if (stopped) toast(t('toast.switched', { from: stopped, to: toName }), true);
+      else if (a === 'stop') toast(t('toast.stop'), true);
+      else if (r.checkpoint_switched) toast(t('toast.cpSwitch', { m: cpLabel(r.checkpoint) }), true);
+      else toast(t(SEL === 'kyojin' ? 'toast.loadLong' : 'toast.' + a, { verb: t('verb.' + a) }), true);
+    } catch (e) { toast(t('toast.fail', { verb: t('verb.' + a), msg: e.message }), false); }
+    finally {
+      actionPending = false;
+      button.textContent = t('btn.' + a);
+      renderDetail(S);
+    }
+    setTimeout(() => { refreshSlow(); refreshFast(); }, 900);
+  };
+}
+
+$('bootToggle').onchange = async (ev) => {
+  ev.target.disabled = true;
+  try {
+    // 启用点名当前变体（启用它会自动取消其余引擎/另一个变体的自启）；
+    // 取消时不带变体：服务端会把该引擎所有变体单元的 self-start 都关掉。
+    const r = await post('/api/boot', Object.assign({ enabled: ev.target.checked, engine: SEL },
+                                                    ev.target.checked ? { variant: KVAR } : {}));
+    const dis = [...(r.disabled_others || []).map(k => (ENGINES[k] || {}).label || k),
+                 r.disabled_variant].filter(Boolean).join(', ');
+    toast(ev.target.checked
+      ? (dis ? t('toast.bootOnOther', { k: dis }) : t('toast.bootOn'))
+      : t('toast.bootOff'), true);
+  } catch (e) {
+    toast(t('toast.setFail', { msg: e.message }), false);
+    ev.target.checked = !ev.target.checked;
+  } finally { ev.target.disabled = false; }
+};
+
+/* ------------------------------------------------------------
+   实时日志：默认展开，随主循环一起刷新。
+   标签页切到后台或折叠时暂停轮询，避免无谓地反复拉起 docker logs。
+   ------------------------------------------------------------ */
+const logActive = () => $('logBox').open && document.visibilityState === 'visible' && !logPaused;
+
+let hidden = 0;
+let logPaused = false;
+let logRaw = [];          // 未经过滤的原始行，供过滤框反复筛选
+let logLoaded = false;    // 首次成功取到日志前，空列表显示"加载中…"而不是"暂无日志"
+
+/* 暂停按钮的文字随语言与自身状态变，所以单独一个同步点 */
+function syncPauseBtn() {
+  $('logPause').textContent = logPaused ? t('log.resume') : t('log.pause');
+  $('logPause').title = t('log.pauseTip');
+}
+
+function renderLogs(lines) {
+  const pre = $('logs');
+  logRaw = lines;
+  const q = ($('logFilter').value || '').trim();
+  const shown = q ? lines.filter(l => l.includes(q)) : lines;
+  // 用户没往上翻时跟随最新一行；翻上去了就不打扰他的阅读位置
+  const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 28;
+  const esc = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  pre.innerHTML = shown.length
+    ? shown.map(l => {
+        let cls = '';
+        if (/(ERROR|FAILED|failed|out of memory|refus)/.test(l)) cls = 'l-err';
+        else if (/(WARNING|WARN|NOTE|cannot|could not)/.test(l)) cls = 'l-warn';
+        else if (/(engine listening|listening on|ready)/.test(l)) cls = 'l-ok';
+        return `<span class="${cls}">${esc(l)}</span>`;
+      }).join('\n')
+    : (q ? t('log.nomatch') : t(logLoaded ? 'log.empty' : 'log.loading'));
+  if (stick && !q) pre.scrollTop = pre.scrollHeight;
+  const clock = new Date().toLocaleTimeString(loc(), { hour12: false });
+  $('logMeta').textContent = t('log.meta', { t: clock, n: shown.length }) +
+    (q ? t('log.filtered', { n: lines.length }) : (hidden ? t('log.hidden', { n: hidden }) : ''));
+  $('logDot').className = 'livedot' + (logActive() ? '' : ' paused');
+}
+
+async function loadLogs() {
+  if (!logActive()) return;
+  try {
+    const d = await getJson(api('/api/logs'));
+    if (!logActive()) return;
+    hidden = d.hidden || 0;
+    logLoaded = true;
+    renderLogs(d.lines || []);
+  } catch (e) {
+    $('logMeta').textContent = t('log.readFailed');
+    $('logDot').className = 'livedot paused';
+  }
+}
+
+$('logFilter').addEventListener('input', () => renderLogs(logRaw));
+
+$('logPause').onclick = () => {
+  logPaused = !logPaused;
+  syncPauseBtn();
+  $('logPause').classList.toggle('on', logPaused);
+  $('logPause').setAttribute('aria-pressed', String(logPaused));
+  if (!logPaused) loadLogs(); else renderLogs(logRaw);
+  $('logDot').className = 'livedot' + (logActive() ? '' : ' paused');
+};
+
+$('expStatus').onclick = () => { location.href = api('/api/export/status'); };
+$('expLogs').onclick = () => { location.href = api('/api/export/logs'); };
+
+$('logBox').addEventListener('toggle', () => {
+  $('logDot').className = 'livedot' + (logActive() ? '' : ' paused');
+  loadLogs();
+});
+
+/* 双通道定时器：快速 1 秒刷系统资源/速度，慢速 3 秒刷单元状态/告警/日志。
+   标签页切到后台时全部暂停，回到前台立即补一次再重启，避免无人看时白跑。 */
+let fastTimer = null, slowTimer = null;
+function stopTimers() {
+  if (fastTimer) clearInterval(fastTimer);
+  if (slowTimer) clearInterval(slowTimer);
+  fastTimer = slowTimer = null;
+}
+function startTimers() {
+  stopTimers();
+  fastTimer = setInterval(refreshFast, 1000);
+  slowTimer = setInterval(() => { refreshSlow(); loadLogs(); }, 3000);
+}
+
+document.addEventListener('visibilitychange', () => {
+  $('logDot').className = 'livedot' + (logActive() ? '' : ' paused');
+  if (document.hidden) {
+    stopTimers();
+  } else {
+    refreshSlow(); refreshFast(); loadLogs();
+    startTimers();
+  }
+});
+
+/* 切语言：先刷静态标记，再用内存里的状态立即重绘一遍动态文本，
+   不等下一次轮询（否则会看到半中半英的一两秒）。浮点时间戳那类
+   慢字段随后由 refreshFast 归位。 */
+function applyLang(lang) {
+  LANG = lang;
+  localStorage.setItem(LANG_KEY, lang);
+  applyStatic();
+  renderRes(S.sys, S.history && S.history.sys);
+  renderKpis(S);
+  renderEnginePills(S);
+  renderAlerts(S);
+  renderHistory(S);
+  renderLogs(logRaw);
+  if (failCount >= 2) {
+    $('stateText').textContent = t('state.disconnected');
+    $('dot').className = 'dot err';
+  } else {
+    renderDetail(S);
+  }
+  refreshFast(); refreshSlow(); loadLogs();
+}
+
+$('langBtn').onclick = () => applyLang(LANG === 'en' ? 'zh' : 'en');
+
+applyStatic();
+renderEnginePills(S);
+refreshSlow();
+refreshFast();
+loadLogs();
+checkUpdate();
+startTimers();
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+[Unit]
+Description=halogen control panel (8733, LAN remote start/stop)
+Documentation=file:///home/xiaoming/halogen-control.py
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/xiaoming/halogen-control.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

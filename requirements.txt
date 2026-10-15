@@ -1,0 +1,3 @@
+# The panel runs on the system Python; aiohttp is its only dependency.
+# On Debian/Ubuntu prefer the apt package (python3-aiohttp) so OS upgrades carry it.
+aiohttp>=3.8
