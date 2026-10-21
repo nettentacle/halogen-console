@@ -82,7 +82,7 @@ table.tbl td, #logs { font-family: var(--font-mono); font-variant-numeric: tabul
 .det { display: flex; flex-direction: column; gap: 20px; min-height: 0; }
 
 /* ---------- 顶栏 ---------- */
-.top { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+.top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
        margin-bottom: 24px; padding-bottom: 22px; border-bottom: 1px solid var(--border); }
 .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .logo { width: 44px; height: 44px; flex: none; border-radius: 13px; background: var(--accent);
@@ -130,23 +130,24 @@ button:disabled { opacity: .5; cursor: not-allowed; }
             place-items: center; font-size: 17px; }
 .icon-btn:hover { color: var(--fg); }
 
-.actions { display: flex; gap: 10px; margin: 0; flex-wrap: wrap; }
-.actions .btn { width: auto; padding: 9px 15px; min-height: 44px; }
+.actions { display: flex; gap: 7px; margin: 0; flex-wrap: wrap; }
+.actions .btn { width: auto; padding: 9px 10px; min-height: 44px; }
 
-/* 引擎切换分段控件：halogen / kyojin / strata / gsqhalo 四选一（都要独占本机内存，互斥运行） */
+/* 引擎切换分段控件：halogen / kyojin / strata / gsqhalo / hipfire / gufo 六选一（都要独占本机内存，互斥运行） */
 .seg { display: inline-flex; gap: 3px; padding: 3px; flex: none;
        background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-md); }
-.seg-btn { border: 0; background: transparent; color: var(--muted); font-size: 13px;
-           font-weight: 600; padding: 6px 13px; border-radius: calc(var(--r-md) - 3px); }
+.seg-btn { border: 0; background: transparent; color: var(--muted); font-size: 12.5px;
+           font-weight: 600; padding: 6px 7px; border-radius: calc(var(--r-md) - 3px); }
 .seg-btn:hover { color: var(--fg); }
 .seg-btn.on { background: var(--card); color: var(--fg); box-shadow: var(--shadow); }
 .seg-btn.on[data-engine="kyojin"], .seg-btn.on[data-engine="strata"],
-.seg-btn.on[data-engine="gsqhalo"] { color: var(--accent); }
+.seg-btn.on[data-engine="gsqhalo"], .seg-btn.on[data-engine="hipfire"],
+.seg-btn.on[data-engine="gufo"] { color: var(--accent); }
 /* 正在运行的那个引擎的按钮带一个绿点，一眼看出"现在活的是谁" */
 .seg-btn.live::after { content: "•"; color: var(--ok); margin-left: 5px; }
 /* kyojin 的模型子选择（只在该引擎被选中时出现；变体之间同样互斥，启动/重启时生效） */
 .ksel { background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-md);
-        color: var(--fg); font-size: 13px; font-weight: 600; padding: 6px 8px; max-width: 200px; }
+        color: var(--fg); font-size: 12.5px; font-weight: 600; padding: 5px 6px; max-width: 200px; }
 
 /* ---------- 卡片 ---------- */
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; }
@@ -191,6 +192,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .c-gpu  { color: #e8a13d; }
 .c-npu  { color: #a583f0; }
 .c-disk { color: #4fb8d8; }
+.c-net  { color: #63d471; }
 .c-ok   { color: var(--ok); }
 
 /* ---------- 资源层 ---------- */
@@ -370,13 +372,33 @@ table.tbl tr:last-child td { border-bottom: 0; }
   .spark-empty { height: clamp(18px, 2.8vh, 30px); margin-top: 6px; flex-shrink: 0; }
   .spark { height: clamp(18px, 2.8vh, 30px); }
   /* 行高按内容定底线、有余量才拉伸：写死 repeat(N, 1fr) 时行数一变（2026-10-08
-     加 NPU 行即为例），fr 行会被挤到低于内容，几行文字叠在一起。窗口不够高时
-     就让这一块自己滚（与日志/表格内部滚动同一约定），而不是硬压。 */
+     加 NPU 行即为例），fr 行会被挤到低于内容，几行文字叠在一起。
+     2026-10-15 起要求"8 行全部可见、不要内部下拉"：间距与 spark 收窄，卡片特别矮时
+     切成单行条目（见下方容器查询）。overflow-y:auto 只作兜底，常见窗口下不该出现。 */
   .res { flex: 1; min-height: 0; grid-template-columns: repeat(2, minmax(0, 1fr));
-         grid-auto-rows: minmax(min-content, 1fr); gap: 10px 20px;
+         grid-auto-rows: minmax(min-content, 1fr); gap: 8px 16px;
          align-content: stretch; overflow-y: auto; }
-  .res-item { padding-bottom: 8px; }
-  .res-head { margin-bottom: 5px; }
+  .res-item { padding-bottom: 5px; }
+  .res-head { margin-bottom: 3px; }
+  /* res 行内的 spark 比 KPI 卡片的矮一档（KPI 的 30px 不动），省出的高度正好
+     让 8 行在 1080 高度也放得下 */
+  .res .spark, .res .spark-empty { height: clamp(12px, 1.6vh, 22px); }
+  /* 矮窗口（卡片 ≤ ~390px 高，约合视口高 < 1000）→ 旧版式整体缩一号并改 3 列：
+     每项仍是"名称+数值 / 趋势线(水位条) / 标签"的竖排，只缩小尺寸与间距，
+     8 项三行排完、无内部滚动。容器查询按卡片自身高度判断（与窗口尺寸解耦）；
+     不支持容器查询的浏览器自动落回上面的两列紧凑排法。 */
+  .res-card { container-type: size; }
+  @container (max-height: 390px) {
+    .res { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px 14px; }
+    .res-item { padding-bottom: 1px; }
+    .res-head { margin-bottom: 1px; }
+    .res .spark, .res .spark-empty { height: 9px; }
+    .res .spark-empty { margin-top: 1px; }
+    .res .tags { margin-top: 1px; gap: 2px; }
+    .res .tag { font-size: 9.5px; padding: 0 3px; }
+    .res-label { font-size: 12px; }
+    .res-val { font-size: 12.5px; }
+  }
   .res-val { font-size: 14px; }
   .res-label { font-size: 13px; }
   .tags { margin-top: 5px; gap: 4px; }
@@ -426,12 +448,14 @@ table.tbl tr:last-child td { border-bottom: 0; }
     <div class="alerts" id="alerts" aria-live="polite"></div>
     <div class="spacer"></div>
     <div class="actions">
-      <!-- 引擎切换：四个引擎都要独占本机内存，同一时刻只能跑一个 -->
+      <!-- 引擎切换：六个引擎都要独占本机内存，同一时刻只能跑一个 -->
       <div class="seg" id="engineSeg" role="group" data-i18n-aria="eng.pick">
         <button class="seg-btn" id="engBtn-halogen" data-engine="halogen">halogen</button>
         <button class="seg-btn" id="engBtn-kyojin"  data-engine="kyojin">kyojin</button>
         <button class="seg-btn" id="engBtn-strata"  data-engine="strata">strata</button>
         <button class="seg-btn" id="engBtn-gsqhalo" data-engine="gsqhalo">gsqhalo</button>
+        <button class="seg-btn" id="engBtn-hipfire" data-engine="hipfire">hipfire</button>
+        <button class="seg-btn" id="engBtn-gufo"    data-engine="gufo">gufo</button>
       </div>
       <!-- kyojin 的模型子选择（GLM/Qwen 两条车道互斥；只在该引擎被选中时显示） -->
       <select class="ksel" id="kVariant" hidden data-i18n-aria="kv.pick"></select>
@@ -486,7 +510,7 @@ table.tbl tr:last-child td { border-bottom: 0; }
   </div>
 
   <!-- 分析层：活动类看趋势（sparkline），容量类看水位（进度条） -->
-  <div class="card">
+  <div class="card res-card">
     <h2><span data-i18n="res.title">系统资源</span> <span class="hint" id="sampleStamp" data-i18n="res.waiting">等待采样…</span></h2>
     <div class="res" id="res"></div>
   </div>
@@ -521,9 +545,9 @@ table.tbl tr:last-child td { border-bottom: 0; }
       <div class="kv"><span data-i18n="svc.vision">图像输入</span><b id="dVis">—</b></div>
       <div class="kv"><span data-i18n="svc.pool">KV 池 / 槽位</span><b id="dPool">—</b></div>
       <div class="kv"><span data-i18n="svc.uptime">已运行</span><b id="dUp">—</b></div>
-      <div class="kv"><span data-i18n="svc.draft">草稿采纳率</span><b id="dDraft">—</b></div>
+      <div class="kv"><span id="dDraftLabel" data-i18n="svc.draft">草稿采纳率</span><b id="dDraft">—</b></div>
       <div class="kv"><span data-i18n="svc.cache">缓存命中</span><b id="dCache">—</b></div>
-      <div class="kv"><span><span data-i18n="svc.headroom">页缓存余量</span><span class="when" data-i18n="svc.atStartup">启动时</span></span><b id="dHead">—</b></div>
+      <div class="kv"><span><span id="dHeadLabel" data-i18n="svc.headroom">页缓存余量</span><span class="when" data-i18n="svc.atStartup">启动时</span></span><b id="dHead">—</b></div>
     </div>
 
     <div class="card">
@@ -587,7 +611,7 @@ const $ = id => document.getElementById(id);
    占位符写成 {name}，用 t(key, {name: value}) 代入。
    ============================================================ */
 const I18N = {
-  'app.title':        { zh: 'HALOGEN / KYOJIN / STRATA 控制台', en: 'HALOGEN / KYOJIN / STRATA Console' },
+  'app.title':        { zh: 'HALOGEN 多引擎控制台', en: 'HALOGEN Multi-Engine Console' },
   'state.connecting': { zh: '正在连接…', en: 'Connecting…' },
   'state.disconnected': { zh: '连接中断', en: 'Disconnected' },
   'theme.toggle':     { zh: '切换主题', en: 'Toggle theme' },
@@ -625,6 +649,8 @@ const I18N = {
                      en: 'Compares against the newest tag of {repo} on GitHub; checked once per page load' },
   'upd.tipNew':    { zh: '升级后必须重新打 serve_api.py 补丁，否则 /health 的 version.match 会变 false',
                      en: 'After upgrading you must re-apply the serve_api.py patch, or /health version.match turns false' },
+  'upd.tipNewHipfire': { zh: '运行 hipfire update --tag <tag> 升级；源码构建的内核可能重新 JIT，首次请求会慢一些',
+                         en: 'Upgrade with hipfire update --tag <tag>; a source-built kernel set may re-JIT, so the first request can be slow' },
 
   'res.title':   { zh: '系统资源', en: 'System resources' },
   'res.waiting': { zh: '等待采样…', en: 'Waiting for sample…' },
@@ -656,6 +682,21 @@ const I18N = {
   'res.iops':    { zh: 'IOPS <b>{v}</b>', en: 'IOPS <b>{v}</b>' },
   'res.busy':    { zh: '繁忙 <b>{v}%</b>', en: 'busy <b>{v}%</b>' },
   'res.capUsed': { zh: '容量已用 <b>{v}%</b>', en: 'capacity used <b>{v}%</b>' },
+  'res.net':     { zh: '网络', en: 'Network' },
+  'res.netIo':   { zh: '↓ {r} · ↑ {t} <em>MB/s</em>', en: '↓ {r} · ↑ {t} <em>MB/s</em>' },
+  'res.netDown': { zh: '未连接', en: 'Disconnected' },
+  'res.netIf':   { zh: '<b>{n}</b> · {k}', en: '<b>{n}</b> · {k}' },
+  'res.netWifi': { zh: 'WiFi', en: 'WiFi' },
+  'res.netEth':  { zh: '有线', en: 'Ethernet' },
+  'res.netIp':   { zh: 'IP <b>{v}</b>', en: 'IP <b>{v}</b>' },
+  'res.netSig':  { zh: '信号 <b>{v}</b> dBm', en: 'signal <b>{v}</b> dBm' },
+  'res.netRate': { zh: '协商 <b>{v}</b> Mb/s', en: 'link <b>{v}</b> Mb/s' },
+  'res.netOthers': { zh: '另有 <b>{n}</b>', en: 'also <b>{n}</b>' },
+  'res.netTip':  { zh: '吞吐为 /proc/net/dev 每秒差值；WiFi 的 SSID/信号/协商速率由 iw 每 10 秒读取',
+                   en: 'Throughput from /proc/net/dev per-second delta; Wi-Fi SSID/signal/link rate read with iw every 10 s' },
+  'res.netSsid': { zh: 'SSID {v}', en: 'SSID {v}' },
+  'res.netGw':   { zh: '网关 {v}', en: 'gateway {v}' },
+  'res.netTotal':{ zh: '累计 ↓{r} ↑{t} GB', en: 'total ↓{r} ↑{t} GB' },
   'res.sampling':{ zh: '采样中…', en: 'Sampling…' },
   'res.unavail': { zh: '不可用', en: 'Unavailable' },
   'res.vramNote':{ zh: '专用显存 · UMA 切分 <b>{v}</b> GB',
@@ -684,10 +725,18 @@ const I18N = {
   'svc.pool':     { zh: '上下文 / 槽位', en: 'Context / slots' },
   'svc.uptime':   { zh: '已运行', en: 'Uptime' },
   'svc.draft':    { zh: '草稿采纳率', en: 'Draft accept rate' },
-  'svc.cache':    { zh: '缓存命中', en: 'Cache hit rate' },
+  'svc.draftTau': { zh: '草稿 τ（累计接受长度）', en: 'Draft τ (cumulative accepted length)' },
+  'svc.draftTauTip': { zh: 'hipfire 的 /metrics 只暴露累计平均接受长度 τ（不是接受率）；最近一次请求的 τ 见下方日志',
+                       en: 'hipfire /metrics exposes the cumulative mean accepted length τ (not an acceptance rate); the last request τ is in the log below' },
+  'svc.cache':    { zh: '缓存命中', en: 'Cache hit' },
   'svc.headroom': { zh: '页缓存余量', en: 'Page-cache headroom' },
+  'svc.headHipfire': { zh: '权重后可用', en: 'Free after weights' },
+  'svc.headGufo': { zh: '宿主余量（加载后）', en: 'Host free after load' },
   'svc.atStartup':{ zh: '启动时', en: 'at startup' },
+  'svc.headValHipfire': { zh: '{gib} GiB（free_after_weights）', en: '{gib} GiB (free_after_weights)' },
+  'svc.headValGufo': { zh: '{gib} GiB（host_available）', en: '{gib} GiB (host_available)' },
   'svc.isReady':  { zh: '就绪', en: 'ready' },
+  'svc.unresponsive': { zh: '无响应（内存压缩）', en: 'unresponsive (compaction)' },
   'svc.on':       { zh: '已启用', en: 'enabled' },
   'svc.off':      { zh: '未启用', en: 'disabled' },
   'svc.headVal':  { zh: '{gib} GiB · {n} 个连续块', en: '{gib} GiB · {n} contiguous blocks' },
@@ -731,8 +780,8 @@ const I18N = {
   'toast.setFail': { zh: '设置失败：{msg}', en: 'Failed to save: {msg}' },
   'toast.switched': { zh: '已先停止 {from}，正在启动 {to}。加载约需 1–5 分钟。',
                       en: 'Stopped {from} first; starting {to}. Loading takes 1–5 minutes.' },
-  'toast.loadLong': { zh: '已下发：{verb}模型。加载约需 3–5 分钟。',
-                      en: 'Sent: {verb} the model. Loading takes 3–5 minutes.' },
+  'toast.loadLong': { zh: '已下发：{verb}模型。加载约需 10 秒–5 分钟。',
+                      en: 'Sent: {verb} the model. Loading takes 10 s–5 min.' },
   'toast.cpSwitch': { zh: '已先停当前实例，正在用检查点 {m} 启动。加载约需 1 分钟。',
                       en: 'Stopped the running instance; starting with checkpoint {m}. Loading takes about a minute.' },
   'toast.bootOnOther': { zh: '已设为开机自启（同时取消了 {k} 的自启，引擎互斥）',
@@ -753,11 +802,11 @@ const I18N = {
                    en: 'Selected {m}: press Start or Restart to switch (the running instance stops first)' },
   'cp.v2':           { zh: 'v2（标准）',              en: 'v2 (standard)' },
   'cp.abliterated':  { zh: 'v2 破限（Quat3rnion）',  en: 'v2 uncensored (Quat3rnion)' },
-  'eng.pickOne': { zh: '查看并操作 {k} · 四个引擎互斥运行（各自要独占本机内存/显存）',
-                   en: 'View and control {k} · the four engines are mutually exclusive (each needs most of the host memory)' },
+  'eng.pickOne': { zh: '查看并操作 {k} · 六个引擎互斥运行（各自要独占本机内存/显存）',
+                   en: 'View and control {k} · the six engines are mutually exclusive (each needs most of the host memory)' },
   'switch.confirm': {
-    zh: '将先停止 {from}，再启动 {to}。\n\n四个引擎不能同时运行（各自要独占本机内存/显存），启动约需 1 分钟（kyojin 3–5 分钟）。继续？',
-    en: 'This will stop {from} first, then start {to}.\n\nThe four engines cannot run at once (each needs most of the host memory/VRAM); starting takes about a minute (kyojin 3–5 minutes). Continue?' },
+    zh: '将先停止 {from}，再启动 {to}。\n\n六个引擎不能同时运行（各自要独占本机内存/显存），启动约需 10 秒–1 分钟（kyojin 3–5 分钟）。继续？',
+    en: 'This will stop {from} first, then start {to}.\n\nThe six engines cannot run at once (each needs most of the host memory/VRAM); starting takes about 10 s–1 min (kyojin 3–5 minutes). Continue?' },
   'upd.noCheck':  { zh: '本地源码构建 · 无版本接口', en: 'Local source build · no version endpoint' },
   'upd.tipLocal': { zh: '{repo} 由本地源码构建，控制台不做版本检查（升级走 git pull）',
                     en: '{repo} is built from local source; the console does not check versions (upgrade via git pull)' },
@@ -774,6 +823,8 @@ const I18N = {
                            en: 'The update check compares the local git commit with the default branch of {repo} (the engine-reported version lags the checkout); checked once per page load' },
 
   'state.loadingModel': { zh: '正在加载模型…', en: 'Loading model…' },
+  'state.unresponsive': { zh: '引擎无响应（内核内存压缩）', en: 'Engine unresponsive (kernel memory compaction)' },
+  'state.unresponsiveTip': { zh: '引擎进程被内核内存压缩卡住，压缩结束后会自动恢复，不是重新加载模型。持续 15 分钟以上看门狗才会重启它。', en: 'The engine is stalled in kernel memory compaction and recovers when compaction ends; it is not reloading the model. The watchdog only restarts it after 15 minutes.' },
   'state.running':      { zh: '运行中 · {v}', en: 'Running · {v}' },
   'state.inflight':     { zh: ' · {n} 个请求生成中', en: ' · {n} in flight' },
   'state.startFail':    { zh: '启动失败', en: 'Failed to start' },
@@ -805,8 +856,8 @@ let LANG = localStorage.getItem(LANG_KEY) === 'en' ? 'en' : 'zh';
 const loc = () => LANG === 'en' ? 'en-GB' : 'zh-CN';
 
 /* ============================================================
-   引擎选择：面板同时看四个引擎，SEL 是当前查看/操作的那一个。
-   四个引擎各需独占本机大半内存/显存，永远互斥运行——
+   引擎选择：面板同时看六个引擎，SEL 是当前查看/操作的那一个。
+   六个引擎各需独占本机大半内存/显存，永远互斥运行——
    选谁只影响"看谁、操作谁"，真正的互斥由服务端在启动/自启时保证。
    ============================================================ */
 const ENGINES = {
@@ -819,6 +870,12 @@ const ENGINES = {
   strata:  { label: 'strata' },
   /* gsqhalo：podman 容器（GSQHalo.cpp），源码构建无版本号 → 显示 git 短提交 */
   gsqhalo: { label: 'gsqhalo' },
+  /* hipfire：原生 Rust/HIP（warpfront/hipfire），unit hipfire-27b；有 tag 版本号，
+     更新检查按 GitHub tags 比；DFlash + 视觉塔在单元里已开好。 */
+  hipfire: { label: 'hipfire' },
+  /* gufo：Strix Halo 专用引擎（gufo-org/gufo），unit gufo；官方预构建容器跑在
+     rootless podman 里，端点与 llama.cpp 同形；有 tag 版本号，按 GitHub tags 比。 */
+  gufo:    { label: 'gufo' },
 };
 const ENG_KEY = 'halogenEngineSel';
 const savedEng = localStorage.getItem(ENG_KEY);
@@ -1012,6 +1069,47 @@ function renderRes(sys, hist) {
     }));
   }
 
+  // 网络：主轴与硬盘同为"活动类"——主接口（默认路由那个）的实时吞吐；标签给
+  // 接口/类型、IP、信号（WiFi）或协商速率（有线）；其余 up 的物理接口列进"另有"。
+  const net = sys.net;
+  if (net) {
+    const ifs = net.ifaces || [];
+    const prim = ifs.find(i => i.name === net.primary) || ifs[0];
+    if (prim) {
+      const tip = [
+        t('res.netTip'),
+        prim.ssid ? t('res.netSsid', { v: prim.ssid }) : '',
+        net.gateway ? t('res.netGw', { v: net.gateway }) : '',
+        prim.rx_gb != null ? t('res.netTotal', { r: pct(prim.rx_gb, 1), t: pct(prim.tx_gb, 1) }) : '',
+      ].filter(Boolean).join(' · ');
+      const ifTag = t('res.netIf', { n: prim.name, k: prim.kind === 'wifi' ? t('res.netWifi') : t('res.netEth') });
+      const rateTag = prim.signal_dbm != null ? t('res.netSig', { v: prim.signal_dbm })
+        : prim.bitrate_rx_mbps != null ? t('res.netRate', { v: prim.bitrate_rx_mbps })
+        : prim.speed_mbps != null ? t('res.netRate', { v: prim.speed_mbps }) : '';
+      const others = ifs.filter(i => i !== prim && i.up).map(i => i.name);
+      if (prim.up) {
+        const live = prim.rx_mbs != null;
+        rows.push(resRow({
+          label: t('res.net'),
+          value: live ? t('res.netIo', { r: pct(prim.rx_mbs, 2), t: pct(prim.tx_mbs, 2) })
+                      : t('res.sampling'),
+          spark: live ? spark(h.net, 'c-net') : '',
+          title: tip,
+          tags: [ifTag,
+                 prim.ipv4 ? t('res.netIp', { v: prim.ipv4 }) : '',
+                 rateTag,
+                 others.length ? t('res.netOthers', { n: others.join(', ') }) : '',
+                ].filter(Boolean),
+        }));
+      } else {
+        rows.push(resRow({
+          label: t('res.net'), value: t('res.netDown'), spark: '', title: tip,
+          tags: [ifTag, prim.ipv4 ? t('res.netIp', { v: prim.ipv4 }) : ''].filter(Boolean),
+        }));
+      }
+    }
+  }
+
   if (gpu) {
     const v = gpu.vram || {}, g = gpu.gtt || {};
     rows.push(resRow({
@@ -1047,6 +1145,7 @@ let failCount = 0;
    ------------------------------------------------------------ */
 let updateState = { phase: 'checking' };
 let updateRendered = '';
+let updateSeq = 0;
 
 const verText = s => String(s == null ? '' : s).replace(/^v/i, '');
 
@@ -1108,7 +1207,7 @@ function renderUpdate() {
       ` <a href="https://github.com/${repo}/tags" target="_blank" rel="noopener"`
       + ` title="${t('upd.open')}">↗</a>`;
     el.classList.add('upd-new');
-    el.title = t('upd.tipNew');
+    el.title = t(u.engine === 'hipfire' ? 'upd.tipNewHipfire' : 'upd.tipNew');
   } else {
     el.textContent = t('upd.current', { v: verText(u.local) });
     el.title = t('upd.tip', { repo });
@@ -1116,10 +1215,15 @@ function renderUpdate() {
 }
 
 async function checkUpdate() {
+  // 切换引擎/首次自动跟随时会连发两次查询：只认最后一次，防止先发的
+  // 旧引擎结果后到、把新引擎的卡片覆盖掉。
+  const seq = ++updateSeq;
   try {
     const d = await getJson(api('/api/update'));
+    if (seq !== updateSeq) return;
     updateState = d.error ? { phase: 'failed', error: d.error, ...d } : { phase: 'done', ...d };
   } catch (e) {
+    if (seq !== updateSeq) return;
     updateState = { phase: 'failed', error: e.message };
   }
   renderUpdate();
@@ -1134,7 +1238,8 @@ function renderKpis(d) {
   const srcBuild = key === 'kyojin' || key === 'gsqhalo';
   const verStr = srcBuild ? (head || key)
     : (d.engine && d.engine.version ? 'v' + d.engine.version : '—');
-  $('kVer').textContent = (srcBuild || (m && m.requests_total != null)) ? verStr : '—';
+  // 有版本号就显示（gufo 的 /metrics 没有 requests_total，不能拿它当显示条件）
+  $('kVer').textContent = verStr;
   if (!m) {
     $('kPre').innerHTML = '—<small>tok/s</small>';
     $('kDec').innerHTML = '—<small>tok/s</small>';
@@ -1180,7 +1285,8 @@ function renderDetail(d) {
     + (e.model ? ' · ' + e.model : '');
   $('dModel').textContent = e.model || '—';
   $('dUnit').textContent = unitLabel(u.active);
-  $('dReady').textContent = e.ready ? t('svc.isReady') : (e.status || '—');
+  $('dReady').textContent = e.ready ? t('svc.isReady')
+    : (e.status === 'engine_unresponsive' ? t('svc.unresponsive') : (e.status || '—'));
   $('dVis').textContent = e.vision == null ? '—' : (e.vision ? t('svc.on') : t('svc.off'));
   // halogen：KV 池位置 / 槽位数；kyojin：/slots 里的上下文窗口（无槽位概念）
   $('dPool').textContent = e.kv_pool
@@ -1188,14 +1294,32 @@ function renderDetail(d) {
   $('dUp').textContent = fmtUp(u.uptime_s);
   // 这两个率只有采集到它们的那台引擎才有意义，串台时宁可不显示
   const mine = m && (!m.engine || m.engine === key) ? m : null;
-  $('dDraft').textContent = mine && mine.draft_accept_pct != null ? mine.draft_accept_pct.toFixed(1) + '%' : '—';
+  const isHip = key === 'hipfire';
+  const isGufo = key === 'gufo';
+  const dl = $('dDraftLabel');
+  if (dl) dl.textContent = isHip ? t('svc.draftTau') : t('svc.draft');
+  if (isHip && mine && mine.draft_tau != null) {
+    $('dDraft').textContent = 'τ ' + mine.draft_tau.toFixed(2);
+    $('dDraft').title = t('svc.draftTauTip');
+  } else {
+    $('dDraft').textContent = mine && mine.draft_accept_pct != null ? mine.draft_accept_pct.toFixed(1) + '%' : '—';
+    $('dDraft').title = '';
+  }
   $('dCache').textContent = mine && mine.cache_hit_pct != null ? mine.cache_hit_pct.toFixed(1) + '%' : '—';
   if (!$('bootToggle').disabled) $('bootToggle').checked = (u.enabled === 'enabled');
 
-  // 页缓存余量：本机最关键的健康指标，halogen 独有（kyojin 没有这个探测）
+  // 页缓存余量：halogen 用 contiguous 2 MiB blocks；hipfire 用启动日志的
+  // free_after_weights（"权重后可用"）；gufo 用 load_completed 的 host_available。
+  const hl = $('dHeadLabel');
+  if (hl) hl.textContent = isHip ? t('svc.headHipfire')
+    : isGufo ? t('svc.headGufo') : t('svc.headroom');
   const hr = d.headroom, hb = $('dHead');
   if (hr && hr.gib != null) {
-    hb.textContent = t('svc.headVal', { gib: hr.gib.toFixed(1), n: hr.blocks });
+    hb.textContent = hr.blocks != null
+      ? t('svc.headVal', { gib: hr.gib.toFixed(1), n: hr.blocks })
+      : isGufo
+        ? t('svc.headValGufo', { gib: hr.gib.toFixed(1) })
+        : t('svc.headValHipfire', { gib: hr.gib.toFixed(1) });
     hb.style.color = hr.gib < 8 ? 'var(--danger)' : hr.gib < 10 ? 'var(--warn)' : '';
   } else {
     hb.textContent = '—';
@@ -1212,7 +1336,11 @@ function renderDetail(d) {
   if (active && au) {
     const inflight = (m && m.processing) || (ae && ae.busy ? 1 : 0);
     if (au.active === 'activating' || (au.active === 'active' && ae && !ae.ready)) {
-      cls += ' load'; text = `${nm} · ${t('state.loadingModel')}`;
+      if (au.active === 'active' && ae && ae.status === 'engine_unresponsive') {
+        cls += ' err'; text = `${nm} · ${t('state.unresponsive')}`;
+      } else {
+        cls += ' load'; text = `${nm} · ${t('state.loadingModel')}`;
+      }
     } else if (au.active === 'active' && ae && ae.ready) {
       cls += ' on'; text = `${nm} · ` + t('state.running', { v: ae.version || ae.model || '?' })
         + (inflight ? t('state.inflight', { n: inflight }) : '');
@@ -1225,6 +1353,8 @@ function renderDetail(d) {
   $('dot').className = cls;
   const autostart = au ? au.enabled === 'enabled' : u.enabled === 'enabled';
   $('stateText').textContent = text + (autostart ? t('state.autostart') : '');
+  $('stateText').title = (active && au && au.active === 'active' && ae && ae.status === 'engine_unresponsive')
+    ? t('state.unresponsiveTip') : '';
 
   const starting = (u.active === 'active' || u.active === 'activating');
   $('bStart').disabled = starting;

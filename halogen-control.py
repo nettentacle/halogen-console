@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""halogen / kyojin / strata / gsqhalo 控制面板：局域网内远程启动 / 停止 / 重启模型服务，并显示实时系统状态。
+"""halogen / kyojin / strata / gsqhalo / hipfire / gufo 控制面板：局域网内远程启动 / 停止 / 重启模型服务，并显示实时系统状态。
 
 设计要点
 --------
@@ -8,9 +8,15 @@
   kyojin 是 `kyojin-glm.service`（2026-10-05 部署，GLM-5.3-Flash EXL3），
   strata 是 `strata.service`（2026-10-07 部署，Qwen3.8-Flash-Next GSQ-RCO IQ3_S；当晚由 UD-IQ4_XS 切换而来），
   gsqhalo 是 `gsqhalo.service`（2026-10-07 部署，podman 容器；Qwen3.8-Flash-Next GSQ-RCO IQ3_S
-  + MTP/ngram 投机解码，来自 Aristo94/GSQHalo.cpp = strix-llama 的 GSQ 量化分支）。
-* **四个引擎互斥**：各自都要独占本机大半内存（halogen/kyojin 约 105 GB GTT 常驻
-  显存；strata 约 40 GB 显存 + 55 GiB 内存；gsqhalo 约 71 GB GTT），同一时刻只能跑一个。
+  + MTP/ngram 投机解码，来自 Aristo94/GSQHalo.cpp = strix-llama 的 GSQ 量化分支），
+  hipfire 是 `hipfire-27b.service`（2026-10-17 部署，原生 Rust/HIP 引擎；Qwen3.8-27B MQ4 XTS
+  + DFlash 草稿 + 视觉塔，端口 8731），
+  gufo 是 `gufo.service`（2026-10-21 部署，gufo-org/gufo 官方预构建容器；Qwen3.8-Flash-Next
+  UD-Q4_K_XL 4 分片 + MTP 草稿 + 视觉塔，端口 8731）。
+* **六个引擎互斥**：各自都要独占本机大半内存（halogen/kyojin 约 105 GB GTT 常驻
+  显存；strata 约 40 GB 显存 + 55 GiB 内存；gsqhalo 约 71 GB GTT；hipfire 27B 约 20–25 GB GTT；
+  gufo 约 105 GiB GTT + 2 × 262144 上下文），
+  同一时刻只能跑一个。
   面板因此把"启动/重启 X"实现为先停其余引擎再起 X（见 h_action），
   开机自启也做成互斥（启用一个自动取消其它，见 h_boot）。
 * 无访问口令（局域网可信）。但状态变更接口要求 Content-Type 必须是
@@ -29,6 +35,7 @@
 """
 
 import asyncio
+import fcntl
 import glob
 import json
 import logging
@@ -36,6 +43,9 @@ from contextlib import suppress
 import os
 import re
 import shutil
+import socket
+import struct
+import subprocess
 import time
 from pathlib import Path
 
@@ -49,15 +59,13 @@ GIB = 1024 ** 3
 
 # ------------------------------------------------------------------ 引擎登记表
 #
-# 三个引擎互斥，同一时刻只应有一个在跑。两个 llama.cpp 系（halogen/kyojin）的 HTTP
-# 都开在 8731 —— 端口复用正是互斥的结果，因此面板不需要记住"当前是哪个引擎在答话"，
-# 去 8731 问就是了；strata 在自己的 8088 上（端口与另两个不冲突，互斥仍要面板保证）：
+# 六个引擎互斥，同一时刻只应有一个在跑；所有引擎现在都绑定 8731（端口复用
+# 正是互斥的结果，面板用 systemd 单元状态判断"当前是谁"，不再按端口区分）。
 #   halogen: /health（JSON 状态）+ /metrics（prometheus 文本）
 #   kyojin : /v1/models + /slots（JSON）+ /stats（serve.py 的本地补丁）
 #   strata : /health（JSON 状态）+ /v1/status（JSON：版本 / 上下文 / 最近一次耗时）
-# 注：8088 是 2026-10-07 从 8080 挪过来的 —— 8080 是 llama.cpp 那一套的习惯端口
-# （llama-server 的默认端口，llama.cpp-hub 的每条预设、手开的 llama-server/vLLM 都写它），
-# 两个程序抢同一个端口会让同一个网址时而显示 Strata、时而显示 llama.cpp 的 webui。
+# 2026-10-17：所有引擎统一到 8731。8080 仍是 llama.cpp 那一套的习惯端口，留给
+# 手开的 llama-server/vLLM；原来的 8088 / 8081 / 11435 全部改为 8731。
 ENGINES = {
     "halogen": {
         "unit": "halogen-docker",
@@ -108,8 +116,8 @@ ENGINES = {
         "unit": "strata",
         "label": "strata",
         "model": "Qwen3.8-Flash-Next",
-        "health": "http://127.0.0.1:8088/health",
-        "stats": "http://127.0.0.1:8088/v1/status",
+        "health": "http://127.0.0.1:8731/health",
+        "stats": "http://127.0.0.1:8731/v1/status",
         "log_kind": "journal",
         "log_unit": "strata",
         # 有版本号（/v1/status 的 engine），但上游标签会落在检出之后（0.1.40 的检出
@@ -121,17 +129,57 @@ ENGINES = {
         "unit": "gsqhalo",
         "label": "gsqhalo",
         "model": "Qwen3.8-Flash-Next",
-        # llama.cpp 系（GSQHalo.cpp），端口 8081：/health 判就绪、/slots 给上下文与忙闲、
+        # llama.cpp 系（GSQHalo.cpp），端口 8731：/health 判就绪、/slots 给上下文与忙闲、
         # /props 给模型路径、/metrics（--metrics 开启）给 prometheus 计数器。
-        "health": "http://127.0.0.1:8081/health",
-        "slots": "http://127.0.0.1:8081/slots",
-        "props": "http://127.0.0.1:8081/props",
-        "metrics": "http://127.0.0.1:8081/metrics",
+        "health": "http://127.0.0.1:8731/health",
+        "slots": "http://127.0.0.1:8731/slots",
+        "props": "http://127.0.0.1:8731/props",
+        "metrics": "http://127.0.0.1:8731/metrics",
         "log_kind": "podman",
         "log_container": "gsqhalo",
         # 源码构建，没有版本号：用 git 提交当标识（面板显示短哈希 + 落后上游几个提交）
         "repo": "Aristo94/GSQHalo.cpp",
         "dir": "/home/xiaoming/GSQHalo.cpp",
+    },
+    "hipfire": {
+        "unit": "hipfire-27b",
+        "label": "hipfire",
+        "model": "Qwen3.8-27B MQ4 XTS",
+        # 原生 Rust/HIP 引擎，端口 8731；/health 判就绪（loading_model 非空=加载中），
+        # /stats 给状态轮询，/metrics 给累计计数与每请求 prefill/decode 直方图（面板指标源）。单元里 --vision + HIPFIRE_VISION_MODE=on
+        # 打开 27B 视觉塔，所以面板的"图像输入"按已启用显示。
+        "health": "http://127.0.0.1:8731/health",
+        "stats": "http://127.0.0.1:8731/stats",
+        "metrics": "http://127.0.0.1:8731/metrics",
+        "log_kind": "journal",
+        "log_unit": "hipfire-27b",
+        "vision": True,
+        # 单槽 262144 + DFlash + vision ≈ 22 GB GTT；给 40 GiB 余量
+        "min_avail_gib": 40.0,
+        # 有 tag 版本号（vX.Y.Z）；更新检查按 GitHub tags 比，不走 commit
+        "repo": "warpfront/hipfire",
+        "dir": "/home/xiaoming/.hipfire/src",
+    },
+    "gufo": {
+        "unit": "gufo",
+        "label": "gufo",
+        "model": "Qwen3.8-Flash-Next",
+        # gufo-org/gufo（Strix Halo 专用 C++/HIP 引擎，2026-10-21 部署）：官方预构建
+        # 容器跑在 rootless podman 里，端口 8731。它的端点刻意与 llama.cpp 同名同形：
+        # /health、/slots、/props、/metrics（llama.cpp prometheus 计数器 + gufo_* 扩展），
+        # 所以状态/指标解析与 gsqhalo 同源；/props 的 model_alias 是它独有的标记。
+        "health": "http://127.0.0.1:8731/health",
+        "slots": "http://127.0.0.1:8731/slots",
+        "props": "http://127.0.0.1:8731/props",
+        "metrics": "http://127.0.0.1:8731/metrics",
+        "log_kind": "podman",
+        "log_container": "gufo",
+        "vision": True,
+        # UD-Q4_K_XL 权重 104 GiB + MTP 2.6 GiB + 视觉塔 0.9 GiB + 2 × 262144 会话状态；
+        # 实测加载后 GPU 侧约 105 GiB、宿主余量 15.6 GiB，所以启动门槛给 112 GiB。
+        "min_avail_gib": 112.0,
+        # 有 tag 版本号（vX.Y.Z，release-please 发版，几乎每天一个）；按 GitHub tags 比
+        "repo": "gufo-org/gufo",
     },
 }
 ENGINE_KEYS = tuple(ENGINES)
@@ -304,7 +352,11 @@ async def checkpoint_running(engine, start_key, engine_ready):
 # 面板自身探测产生的访问日志行，默认从日志视图里滤掉
 # （stats 是 2026-10-08 起加的探测端点：halogen 没有它，切换过渡期或状态不明时
 # 的探测会在这里留下 404，与健康/指标探测同属一类噪声）
-_PROBE_NOISE = re.compile(r'\s"(?:GET|HEAD) /(?:health|metrics|stats|cache)\b[^"]*"\s+\d{3}')
+_PROBE_NOISE = re.compile(
+    # docker/llama.cpp 访问日志形态：`"GET /health HTTP/1.1" 200`
+    r'\s"(?:GET|HEAD) /(?:health|metrics|stats|cache)\b[^"]*"\s+\d{3}'
+    # gufo 形态：`method=GET path=/metrics ...`（1 Hz 探测，不滤会刷屏）
+    r'|\bmethod=(?:GET|HEAD) path=/(?:health|metrics|stats|cache|slots|props)\b')
 
 # ---------------------------------------------------------------- 界面语言
 #
@@ -316,8 +368,8 @@ _MSG = {
               "en": "Content-Type must be application/json"},
     "action": {"zh": "action 必须是 start/stop/restart",
                "en": "action must be start/stop/restart"},
-    "engine": {"zh": "engine 必须是 halogen、kyojin、strata 或 gsqhalo",
-               "en": "engine must be halogen, kyojin, strata or gsqhalo"},
+    "engine": {"zh": "engine 必须是 halogen、kyojin、strata、gsqhalo、hipfire 或 gufo",
+               "en": "engine must be halogen, kyojin, strata, gsqhalo, hipfire or gufo"},
     "rc": {"zh": "systemctl 退出码 {rc}", "en": "systemctl exited with code {rc}"},
 }
 
@@ -387,9 +439,56 @@ _HEADROOM_RE = re.compile(
     r"host memory left for everything else:\s*(\d+)\s+contiguous 2 MiB blocks"
     r"\s*\(([\d.]+) GiB total")
 
+# hipfire 没有 halogen 那条 contiguous 2 MiB 行；它在每次 load 时打印
+# `max_seq budget: free_after_weights=<bytes> ...`，作为"权重后可用"的等价指标。
+_HIPFIRE_HEADROOM_RE = re.compile(r"max_seq budget: free_after_weights=(\d+)")
+
+# gufo 在 load_completed 行里报加载后的宿主可用内存（host_available_mib），
+# 即"权重与缓存预留之后还剩给系统/其它进程多少"——与 halogen 的页缓存余量同义。
+_GUFO_HEADROOM_RE = re.compile(r"load_completed\b.*host_available_mib=(\d+)")
+
 
 async def cache_headroom(engine, start_key, engine_ready):
-    # 页缓存余量是 halogen 特有的启动日志行（kyojin 没有对应指标）
+    # halogen：页缓存余量（contiguous 2 MiB blocks）；hipfire：启动日志的
+    # free_after_weights（权重后可用）；gufo：load_completed 的 host_available_mib。
+    # 三者口径不同，前端按 source 换标签。
+    if engine == "gufo":
+        if not start_key:
+            return None
+        if _headroom_cache["key"] == start_key:
+            return _headroom_cache["data"]
+        if not engine_ready:
+            return None
+        _, out = await run(PODMAN, "logs", ENGINES["gufo"]["log_container"], timeout=20)
+        data = None
+        for line in out.splitlines():
+            m = _GUFO_HEADROOM_RE.search(line)
+            if m:
+                data = {"gib": round(int(m.group(1)) / 1024, 1), "blocks": None,
+                        "source": "host_available"}
+        if data is not None:
+            _headroom_cache["key"] = start_key
+            _headroom_cache["data"] = data
+        return data
+    if engine == "hipfire":
+        if not start_key:
+            return None
+        if _headroom_cache["key"] == start_key:
+            return _headroom_cache["data"]
+        if not engine_ready:
+            return None
+        _, out = await run("journalctl", "--user", "-u", "hipfire-27b",
+                           "-n", "500", "--no-pager", "-o", "cat", timeout=20)
+        data = None
+        for line in out.splitlines():
+            m = _HIPFIRE_HEADROOM_RE.search(line)
+            if m:
+                data = {"gib": round(int(m.group(1)) / 1073741824, 1),
+                        "blocks": None, "source": "free_after_weights"}
+        if data is not None:
+            _headroom_cache["key"] = start_key
+            _headroom_cache["data"] = data
+        return data
     if engine != "halogen" or not start_key:
         return None
     if _headroom_cache["key"] == start_key:
@@ -418,23 +517,41 @@ async def cache_headroom(engine, start_key, engine_ready):
     return data
 
 
-async def engine_state(engine: str = DEFAULT_ENGINE):
+# halogen 每次运行（start_key=ActiveEnterTimestampMonotonic）是否曾报告过就绪。
+# 用途：一次运行里「曾经就绪、现在问不到」= 引擎无响应（典型是内核内存压缩），
+# 不是模型在加载；只有从未就绪过（首启）才显示"正在加载模型…"。
+_ready_seen = {}
+
+
+async def engine_state(engine: str = DEFAULT_ENGINE, start_key: str = None):
     """引擎自己的就绪状态：服务 active ≠ 模型已加载完。"""
+    if engine == "hipfire":
+        return await engine_state_hipfire()
     if engine == "kyojin":
         return await engine_state_kyojin()
     if engine == "strata":
         return await engine_state_strata()
     if engine == "gsqhalo":
         return await engine_state_gsqhalo()
+    if engine == "gufo":
+        return await engine_state_gufo()
     try:
         timeout = ClientTimeout(total=4)
         async with ClientSession(timeout=timeout) as s:
             async with s.get(ENGINES["halogen"]["health"]) as r:
                 d = await r.json()
+                # 8731 现在所有引擎共用：只认 halogen 专属的 version 字典，
+                # 避免把别家 /health 误当成 halogen。
+                ver = d.get("version")
+                if not isinstance(ver, dict) or not ver.get("engine"):
+                    return {"ready": False, "status": "unreachable"}
+                ready = d.get("status") == "ok"
+                if ready and start_key:
+                    _ready_seen[engine] = start_key
                 return {
-                    "ready": d.get("status") == "ok",
+                    "ready": ready,
                     "status": d.get("status"),
-                    "version": d.get("version", {}).get("engine"),
+                    "version": ver.get("engine"),
                     "model": d.get("model"),
                     "vision": d.get("vision", {}).get("enabled"),
                     "kv_pool": d.get("kv_pool_positions"),
@@ -442,6 +559,10 @@ async def engine_state(engine: str = DEFAULT_ENGINE):
                     "busy": d.get("busy"),
                 }
     except Exception:  # noqa: BLE001
+        # 本次运行里曾就绪过 → 现在连不上/超时 = 无响应（内存压缩会卡住 PING），
+        # 不是重新加载模型。只有从未就绪过才报 unreachable（前端显示加载中）。
+        if start_key and _ready_seen.get(engine) == start_key:
+            return {"ready": False, "status": "engine_unresponsive"}
         return {"ready": False, "status": "unreachable"}
 
 
@@ -472,6 +593,7 @@ async def engine_state_kyojin():
         except Exception:  # noqa: BLE001
             pass
         ctx = busy = None
+        slots = None
         try:
             async with ClientSession(timeout=ClientTimeout(total=4)) as s:
                 async with s.get(ENGINES["kyojin"]["slots"]) as r:
@@ -481,6 +603,10 @@ async def engine_state_kyojin():
                 busy = any(bool(sl.get("is_processing")) for sl in slots)
         except Exception:  # noqa: BLE001
             pass
+        # 8731 共用：/slots 是 kyojin 的必备端点；halogen/strata/hipfire 没有它，
+        # 不能把别家 /v1/models 当 kyojin。
+        if not isinstance(slots, list):
+            return {"ready": False, "status": "unreachable", "head": head}
         return {"ready": True, "status": "ok", "model": model, "version": None,
                 "vision": vision, "kv_pool": ctx, "slots": None, "busy": busy, "head": head}
     except Exception:  # noqa: BLE001
@@ -488,9 +614,9 @@ async def engine_state_kyojin():
 
 
 async def engine_state_strata():
-    """strata 用 8088（自己的端口，不与 8731 复用；2026-10-07 之前是 8080，与 llama.cpp 撞车）：/health 判就绪与视觉
-    （loaded / images），/v1/status 补版本号、上下文窗口与并发槽数。没起来时
-    两个端点都拒连 → unreachable。"""
+    """strata 现在也在 8731（全引擎统一）：/health 判就绪与视觉（loaded / images），
+    /v1/status 补版本号、上下文窗口与并发槽数。共用端口下必须要求 /v1/status 是
+    strata 的 JSON，否则别家 /health 会被误读。"""
     try:
         timeout = ClientTimeout(total=4)
         async with ClientSession(timeout=timeout) as s:
@@ -498,6 +624,8 @@ async def engine_state_strata():
                 h = await r.json()
             async with s.get(ENGINES["strata"]["stats"]) as r:
                 st = await r.json()
+        if not isinstance(st, dict) or not st.get("engine"):
+            return {"ready": False, "status": "unreachable"}
         return {
             "ready": bool(h.get("loaded")),
             "status": h.get("status"),
@@ -513,10 +641,10 @@ async def engine_state_strata():
 
 
 async def engine_state_gsqhalo():
-    """gsqhalo（llama.cpp 系，8081）：/health 判就绪，/slots 补上下文窗口与忙闲
+    """gsqhalo（llama.cpp 系，现在也在 8731）：/health 判就绪，/slots 补上下文窗口与忙闲
     （kv_unified 下每个槽都报同一个池大小，取第一个；槽数单独给），/props 取模型
     文件名与视觉能力（加载了 -mm 视觉塔时 modalities.vision=true；没加载就是关）。
-    没跑时 /health 拒连 → unreachable。
+    共用端口下必须要求 /props 是 gsqhalo 的响应，否则 halogen 的 /health 会被误读。
 
     head：本地 git 短提交号——引擎没跑时也能给出，面板拿它当"版本"显示。"""
     head = await git_head("gsqhalo")
@@ -527,10 +655,12 @@ async def engine_state_gsqhalo():
                 h = await r.json()
         model = None
         vision = False
+        props_ok = False
         try:
             async with ClientSession(timeout=ClientTimeout(total=4)) as s:
                 async with s.get(ENGINES["gsqhalo"]["props"]) as r:
                     p = await r.json()
+            props_ok = isinstance(p, dict)
             mp = (p or {}).get("model_path") or ""
             if mp:
                 base = mp.replace("\\", "/").rsplit("/", 1)[-1]
@@ -541,6 +671,8 @@ async def engine_state_gsqhalo():
             vision = bool(((p or {}).get("modalities") or {}).get("vision"))
         except Exception:  # noqa: BLE001
             pass
+        if not props_ok:
+            return {"ready": False, "status": "unreachable", "head": head}
         ctx = busy = nslots = None
         try:
             async with ClientSession(timeout=ClientTimeout(total=4)) as s:
@@ -558,6 +690,97 @@ async def engine_state_gsqhalo():
                 "kv_pool": ctx, "slots": nslots, "busy": busy, "head": head}
     except Exception:  # noqa: BLE001
         return {"ready": False, "status": "unreachable", "head": head}
+
+
+async def engine_state_gufo():
+    """gufo（官方预构建容器，8731）：端点刻意与 llama.cpp 同形，但 /props 的
+    model_alias 是它独有的身份标记（共用端口下用它排除别家的响应）。
+    /props 给 build_info（0.20.0 (0c03748)）、槽数与每槽上下文、视觉能力；
+    /slots 补忙闲；/health 判就绪。版本取 build_info 里的版本号，供 tag 更新检查用。"""
+    try:
+        timeout = ClientTimeout(total=4)
+        async with ClientSession(timeout=timeout) as s:
+            async with s.get(ENGINES["gufo"]["props"]) as r:
+                p = await r.json()
+        if not isinstance(p, dict) or "model_alias" not in p:
+            return {"ready": False, "status": "unreachable"}
+        ready = False
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=4)) as s:
+                async with s.get(ENGINES["gufo"]["health"]) as r:
+                    ready = (await r.json()).get("status") == "ok"
+        except Exception:  # noqa: BLE001
+            pass
+        nslots = p.get("total_slots")
+        ctx = busy = None
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=4)) as s:
+                async with s.get(ENGINES["gufo"]["slots"]) as r:
+                    slots = await r.json()
+            if isinstance(slots, list) and slots:
+                ctx = slots[0].get("n_ctx")
+                nslots = len(slots)
+                busy = any(bool(sl.get("is_processing")) for sl in slots)
+        except Exception:  # noqa: BLE001
+            pass
+        build = p.get("build_info") or ""
+        m = re.match(r"(\d+\.\d+\.\d+)", build)
+        return {
+            "ready": ready,
+            "status": "ok" if ready else "loading",
+            "version": m.group(1) if m else None,
+            "model": p.get("model_alias") or p.get("model"),
+            "vision": bool((p.get("modalities") or {}).get("vision")),
+            # 与 gsqhalo 同口径：kv_pool = 每槽上下文，slots = 槽数
+            "kv_pool": ctx,
+            "slots": nslots,
+            "busy": busy,
+        }
+    except Exception:  # noqa: BLE001
+        return {"ready": False, "status": "unreachable"}
+
+
+async def engine_state_hipfire():
+    """hipfire（原生 Rust/HIP，现在也在 8731）：/health 判就绪（loading_model 非空=加载中），
+    /stats 补队列深度与请求数。版本取本地 tag（v0.4.2.1），tag 不在则退回 git 短哈希。
+    视觉能力来自单元配置（--vision + HIPFIRE_VISION_MODE=on），/health 不暴露该字段；
+    槽数从 capabilities.multi_slot_slots 取（当前单元是单槽 262144；开 multi 时自动读 2+）。"""
+    head = await git_head("hipfire")
+    version = (await git_tag("hipfire") or "").lstrip("vV") or None
+    try:
+        timeout = ClientTimeout(total=4)
+        async with ClientSession(timeout=timeout) as s:
+            async with s.get(ENGINES["hipfire"]["health"]) as r:
+                h = await r.json()
+            stats = None
+            try:
+                async with s.get(ENGINES["hipfire"]["stats"]) as r:
+                    stats = await r.json()
+            except Exception:  # noqa: BLE001
+                pass
+        # 8731 共用：/stats 是 hipfire 的必备端点（requests_served），halogen 的
+        # /health 没有它，不能把别家响应当 hipfire。
+        if not isinstance(stats, dict) or "requests_served" not in stats:
+            return {"ready": False, "status": "unreachable", "version": version,
+                    "head": head}
+        loading = h.get("loading_model")
+        ready = h.get("status") == "ok" and bool(h.get("model")) and not loading
+        caps = h.get("capabilities") or {}
+        slots = caps.get("multi_slot_slots") if caps.get("multi_slot") else 1
+        return {
+            "ready": ready,
+            "status": "loading" if loading else h.get("status"),
+            "version": version,
+            "model": h.get("model") or loading,
+            "vision": bool(ENGINES["hipfire"].get("vision")),
+            "kv_pool": h.get("n_ctx"),
+            "slots": slots or 1,
+            "busy": bool((stats or {}).get("queue_depth")),
+            "head": head,
+        }
+    except Exception:  # noqa: BLE001
+        return {"ready": False, "status": "unreachable", "version": version,
+                "head": head}
 
 
 # ------------------------------------------------------------ 推理速度采集
@@ -744,7 +967,7 @@ def _metrics_strata(txt):
     部分）；趋势表的"提示 tokens"给整段提示（prompt_n + cache_n）。
     """
     d = json.loads(txt)
-    # 8731（halogen/kyojin）↔ 8088（strata）换源时清掉共享的采样基准与趋势
+    # 8731（halogen/kyojin）↔ 8731（strata）换源时清掉共享的采样基准与趋势
     _settle_rates("strata", time.monotonic(), (None, None, None, None))
     t = d.get("last_timings") or {}
     act = d.get("activity") or {}
@@ -805,6 +1028,120 @@ def _metrics_strata(txt):
     }
 
 
+_hipfire_acc = {"req": None, "prompt": None, "completion": None,
+                "p_sum": None, "p_cnt": None, "d_sum": None, "d_cnt": None}
+
+
+def _metrics_hipfire(txt):
+    """hipfire 的 /metrics（prometheus 文本）→ 面板指标。
+
+    /metrics 提供累计请求/提示/生成 token 计数，以及每条请求的
+    prefill_tokens_per_second / decode_tokens_per_second 直方图。面板用
+    计数器差分补"完成请求采样"（提示/生成 tokens、预填充/输出 tok/s），用
+    直方图 sum/count 给累计平均；**峰值只取面板实际采样到的单请求差分值**，
+    不使用直方图桶上界。没有 KV/草稿采纳率/延迟原值（卡片对应项显示 —）。"""
+    v = {}
+    for line in txt.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name, _, val = line.rpartition(" ")
+        try:
+            v[name] = float(val)
+        except ValueError:
+            continue
+    g = v.get
+    # 换源时清掉共享采样基准/趋势；同一引擎连续采样不再 reset。
+    if _metrics_src != "hipfire":
+        _settle_rates("hipfire", time.monotonic(), (None, None, None, None))
+
+    req = g("hipfire_requests_total")
+    prompt = g("hipfire_prompt_tokens_total")
+    completion = g("hipfire_completion_tokens_total")
+    cached = g("hipfire_cached_prompt_tokens_total") or 0.0
+    p_sum = g("hipfire_prefill_tokens_per_second_sum")
+    p_cnt = g("hipfire_prefill_tokens_per_second_count")
+    d_sum = g("hipfire_decode_tokens_per_second_sum")
+    d_cnt = g("hipfire_decode_tokens_per_second_count")
+    p_avg = _div(p_sum, p_cnt)
+    d_avg = _div(d_sum, d_cnt)
+
+    acc = _hipfire_acc
+    reset = (acc["req"] is not None and (
+        req is None or req < acc["req"]
+        or (p_sum is not None and acc["p_sum"] is not None and p_sum < acc["p_sum"])
+        or (d_sum is not None and acc["d_sum"] is not None and d_sum < acc["d_sum"])))
+    if reset:
+        _reset_rates()
+        acc.update(req=None, prompt=None, completion=None,
+                   p_sum=None, p_cnt=None, d_sum=None, d_cnt=None)
+
+    if req is not None and acc["req"] is not None and req > acc["req"]:
+        dpt = (prompt - acc["prompt"]
+               if prompt is not None and acc["prompt"] is not None else None)
+        dct = (completion - acc["completion"]
+               if completion is not None and acc["completion"] is not None else None)
+        dp_sum = (p_sum - acc["p_sum"]
+                  if p_sum is not None and acc["p_sum"] is not None else None)
+        dp_cnt = (p_cnt - acc["p_cnt"]
+                  if p_cnt is not None and acc["p_cnt"] is not None else None)
+        dd_sum = (d_sum - acc["d_sum"]
+                  if d_sum is not None and acc["d_sum"] is not None else None)
+        dd_cnt = (d_cnt - acc["d_cnt"]
+                  if d_cnt is not None and acc["d_cnt"] is not None else None)
+        p = _div(dp_sum, dp_cnt) if dp_cnt else None
+        d = _div(dd_sum, dd_cnt) if dd_cnt else None
+        if p is not None:
+            _last_good["prefill"] = p
+            _rate_peak["prefill"] = (p if _rate_peak["prefill"] is None
+                                     else max(_rate_peak["prefill"], p))
+        if d is not None:
+            _last_good["decode"] = d
+            _rate_peak["decode"] = (d if _rate_peak["decode"] is None
+                                    else max(_rate_peak["decode"], d))
+        if p is not None or d is not None:
+            _rate_history.append({
+                "t": int(time.time()), "p": p, "d": d,
+                "pt": int(dpt) if dpt and dpt > 0 else None,
+                "ct": int(dct) if dct and dct > 0 else None,
+            })
+            if len(_rate_history) > RATE_HIST_LEN:
+                del _rate_history[:-RATE_HIST_LEN]
+
+    acc.update(req=req, prompt=prompt, completion=completion,
+               p_sum=p_sum, p_cnt=p_cnt, d_sum=d_sum, d_cnt=d_cnt)
+    # 首次采样用累计平均兜底；之后用最后一条完成请求的差分值。
+    p_now = (_last_good["prefill"] if _last_good["prefill"] is not None else p_avg)
+    d_now = (_last_good["decode"] if _last_good["decode"] is not None else d_avg)
+    # 峰值只来自面板实际采到的单请求差分值（_rate_peak 在收到请求时更新）；
+    # 不用直方图桶上界——那会把"全部请求 ≤1000"误报成峰值 1000。
+    # /metrics 只给 spec_tau summary（平均接受长度），没有草稿/接受 token 计数；
+    # 面板在 hipfire 上显示 τ，而不是伪造一个百分比。
+    spec_sum = g("hipfire_spec_tau_sum")
+    spec_cnt = g("hipfire_spec_tau_count")
+    draft_tau = round(spec_sum / spec_cnt, 2) if spec_cnt else None
+    return {
+        "engine": "hipfire",
+        "prefill_avg": p_avg,
+        "decode_avg": d_avg,
+        "processing": g("hipfire_queue_depth"),
+        "deferred": None,
+        "draft_accept_pct": None,
+        "draft_tau": draft_tau,
+        "cache_hit_pct": (round(cached * 100.0 / prompt, 1)
+                          if prompt and cached is not None else None),
+        "kv_used": None,
+        "kv_ratio_pct": None,
+        "requests_total": req,
+        "prefill_now": p_now,
+        "decode_now": d_now,
+        "is_live": False,
+        "measured_at": int(time.time()),
+        "rate_mode": "per_request_histogram",
+        "prefill_peak": _rate_peak["prefill"],
+        "decode_peak": _rate_peak["decode"],
+    }
+
+
 def _metrics_gsqhalo(txt):
     """gsqhalo 的 /metrics（llama.cpp prometheus 文本）→ 面板指标。
 
@@ -852,6 +1189,51 @@ def _metrics_gsqhalo(txt):
     return out
 
 
+def _metrics_gufo(txt):
+    """gufo 的 /metrics → 面板指标（与 _metrics_gsqhalo 同源：它照抄了 llama.cpp
+    的 prometheus 名字，所以解析逻辑一致）。差异：gufo 多报 kv_cache_usage_ratio，
+    据此给出 kv_ratio_pct；草稿采纳率仍是 spec_decode_* 三个计数器。"""
+    v = {}
+    for line in txt.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name, _, val = line.rpartition(" ")
+        try:
+            v[name] = float(val)
+        except ValueError:
+            continue
+
+    g = v.get
+    live_p, live_d = _settle_rates(
+        "gufo", time.monotonic(),
+        (g("llamacpp:prompt_tokens_total"), g("llamacpp:prompt_seconds_total"),
+         g("llamacpp:tokens_predicted_total"), g("llamacpp:tokens_predicted_seconds_total")))
+
+    last = _last_rates or {}
+    dr = g("llamacpp:spec_decode_num_draft_tokens_total")
+    da = g("llamacpp:spec_decode_num_accepted_tokens_total")
+    cached = g("llamacpp:prompt_tokens_cached_total")
+    proc = g("llamacpp:prompt_tokens_total")
+    kv = g("llamacpp:kv_cache_usage_ratio")
+
+    out = {
+        "engine": "gufo",
+        "prefill_avg": _div(proc, g("llamacpp:prompt_seconds_total")),
+        "decode_avg": _div(g("llamacpp:tokens_predicted_total"),
+                           g("llamacpp:tokens_predicted_seconds_total")),
+        "processing": g("llamacpp:requests_processing"),
+        "deferred": g("llamacpp:requests_deferred"),
+        "draft_accept_pct": round(da * 100.0 / dr, 1) if dr and da is not None else None,
+        "cache_hit_pct": (round(cached * 100.0 / (cached + proc), 1)
+                          if cached is not None and proc is not None and (cached + proc) > 0 else None),
+        "kv_used": None,
+        "kv_ratio_pct": round(kv * 100.0, 1) if kv is not None else None,
+        "requests_total": None,
+    }
+    out.update(_now_fields(live_p, live_d, last.get("at")))
+    return out
+
+
 async def _fetch_text(url, total=3):
     try:
         async with ClientSession(timeout=ClientTimeout(total=total)) as s:
@@ -863,22 +1245,25 @@ async def _fetch_text(url, total=3):
         return None
 
 
-# 8731 是两个引擎共用的端口（谁在跑谁答话，见上面 ENGINES 的说明）。
+# 8731 是全部引擎共用的端口（互斥，同一时刻只有一个绑定；见上面 ENGINES 的说明）。
 # 2026-10-08：判断"这会儿 8731 归谁"用 systemd 单元状态，一次 systemctl 问全部
 # 相关单元 + 3 秒缓存（1 Hz 采样下约每 3 秒一次子进程，可忽略不计）。
+# 2026-10-17：strata / gsqhalo / hipfire 也统一到 8731，全部纳入。
 _UNITS_8731 = (("halogen-docker", "halogen"),
-               ("kyojin-glm", "kyojin"), ("kyojin-qwen", "kyojin"))
+               ("kyojin-glm", "kyojin"), ("kyojin-qwen", "kyojin"),
+               ("strata", "strata"), ("gsqhalo", "gsqhalo"),
+               ("hipfire-27b", "hipfire"), ("gufo", "gufo"))
 _8731_cache = {"at": 0.0, "engine": None}
 _8731_TTL = 3.0
 
 
 async def engine_on_8731():
-    """systemd 眼里这会儿 8731 上答话的是谁：'halogen' / 'kyojin' / None。
+    """systemd 眼里这会儿 8731 上答话的是谁：任一引擎 key 或 None。
 
-    只认 active —— activating/deactivating 是引擎切换的过渡期，此时两个引擎都
-    可能占着端口，宁可给 None 让调用方退回逐个端点试。引擎没在跑（或有人手工
-    起了个不归面板管的野进程）时也是 None。strata/gsqhalo 各有自己的端口与单元，
-    探测它们不会打到 halogen/kyojin 的日志上，不参与这个判据。"""
+    只认 active —— activating/deactivating 是引擎切换的过渡期，此时旧进程可能
+    还没释放端口、新进程还没绑上，宁可给 None 让调用方跳过本轮指标。引擎没在跑
+    （或有人手工起了个不归面板管的野进程）时也是 None。所有引擎现在共用 8731，
+    包括 kyojin 的两个变体。"""
     now = time.monotonic()
     if now - _8731_cache["at"] < _8731_TTL:
         return _8731_cache["engine"]
@@ -894,52 +1279,42 @@ async def engine_on_8731():
 
 
 async def engine_metrics():
-    """按端口问在跑的引擎要指标。halogen/kyojin 共用 8731，同一时刻只有一个在
-    答话：先按 kyojin 的 /stats 问（JSON，本地补丁独有端点——上游 1.3 起 GLM 车道
-    也自带 llamacpp 口径的 /metrics，与 halogen 的标记同名，曾把 kyojin 的指标
-    误标成 halogen，2026-10-08 修：用 /stats 做判别，halogen 没有这个端点）；
-    没有 /stats 再按 halogen 的 /metrics 问（prometheus 文本，需 llamacpp 标记）；
-    strata 在自己的 8088 上答 /v1/status；gsqhalo 在自己的 8081 上答 /metrics
-    （llama.cpp prometheus）。返回值的 engine 字段告诉前端数字属于谁。
-
-    2026-10-08 晚：已知 halogen 在跑时跳过 /stats 那一问——它没有这个端点，问
-    一次就在它的访问日志里留一条 404，1 Hz 采样等于每秒一行（实测 2 小时 7381
-    条，把引擎日志刷成了噪声）。判据是文本里 "halogen:" 前缀的专属计数器：这是
-    "确实是 halogen"的铁证（kyojin 的 /metrics 只有 llamacpp: 前缀）；铁证不在
-    （改版、或 systemd 状态过期）就落回下面的逐个端点试，宁可多问一次也不错标。"""
-    if await engine_on_8731() == "halogen":
-        txt = await _fetch_text(ENGINES["halogen"]["metrics"])
-        if txt and "halogen:" in txt:
-            try:
+    """所有引擎共用 8731（互斥，同一时刻只有一个答话）。先用 systemd 单元状态
+    判断当前引擎，再只问它自己的端点：既避免 1 Hz 探测把 404 写进别的引擎日志，
+    也避免同端口下按 marker 误判（halogen/kyojin/gsqhalo 的 prometheus 名称相近）。
+    返回值的 engine 字段告诉前端数字属于谁；过渡期/未知返回 None。"""
+    who = await engine_on_8731()
+    if not who:
+        return None
+    try:
+        if who == "halogen":
+            txt = await _fetch_text(ENGINES["halogen"]["metrics"])
+            if txt and "halogen:" in txt:
                 return _metrics_halogen(txt)
-            except Exception:  # noqa: BLE001
-                return None
-    txt = await _fetch_text(ENGINES["kyojin"]["stats"])
-    if txt:
-        try:
-            return _metrics_kyojin(txt)
-        except Exception:  # noqa: BLE001
-            return None
-    txt = await _fetch_text(ENGINES["halogen"]["metrics"])
-    if txt and "llamacpp:prompt_tokens_total" in txt:
-        try:
-            return _metrics_halogen(txt)
-        except Exception:  # noqa: BLE001
-            return None
-    txt = await _fetch_text(ENGINES["strata"]["stats"])
-    if txt:
-        try:
-            return _metrics_strata(txt)
-        except Exception:  # noqa: BLE001
-            return None
-    # gsqhalo 在 8081 上答 prometheus（--metrics）；名字与 halogen 同源
-    # （llamacpp:*），但端口不同、各自解析。
-    txt = await _fetch_text(ENGINES["gsqhalo"]["metrics"])
-    if txt and "llamacpp:prompt_tokens_total" in txt:
-        try:
-            return _metrics_gsqhalo(txt)
-        except Exception:  # noqa: BLE001
-            return None
+        elif who == "kyojin":
+            txt = await _fetch_text(ENGINES["kyojin"]["stats"])
+            if txt:
+                return _metrics_kyojin(txt)
+        elif who == "strata":
+            txt = await _fetch_text(ENGINES["strata"]["stats"])
+            if txt:
+                return _metrics_strata(txt)
+        elif who == "gsqhalo":
+            txt = await _fetch_text(ENGINES["gsqhalo"]["metrics"])
+            if txt and "llamacpp:prompt_tokens_total" in txt:
+                return _metrics_gsqhalo(txt)
+        elif who == "hipfire":
+            txt = await _fetch_text(ENGINES["hipfire"]["metrics"])
+            if txt:
+                return _metrics_hipfire(txt)
+        elif who == "gufo":
+            txt = await _fetch_text(ENGINES["gufo"]["metrics"])
+            # gufo 的 prometheus 文本沿用 llama.cpp 的 llamacpp:* 名字，
+            # 另加 gufo_* 扩展；用 counters 名字做归属校验。
+            if txt and "llamacpp:prompt_tokens_total" in txt:
+                return _metrics_gufo(txt)
+    except Exception:  # noqa: BLE001
+        return None
     return None
 
 
@@ -947,7 +1322,8 @@ async def engine_metrics():
 
 # 最近若干次采样，供前端画 sparkline（快速通道 1 秒一次采样，180 个点约 3 分钟）
 HIST_LEN = 180
-_history = {"cpu": [], "gpu": [], "npu": [], "mem": [], "gtt": [], "vram": [], "disk": []}
+_history = {"cpu": [], "gpu": [], "npu": [], "mem": [], "gtt": [], "vram": [],
+            "disk": [], "net": []}
 
 
 def push_history(s):
@@ -956,6 +1332,11 @@ def push_history(s):
         dio = s.get("disk_io") or {}
         read_mbs, write_mbs = dio.get("read_mbs"), dio.get("write_mbs")
         npu = s.get("npu")
+        net = s.get("net") or {}
+        prim = next((i for i in (net.get("ifaces") or [])
+                     if i.get("name") == net.get("primary")), None)
+        rx_mbs = (prim or {}).get("rx_mbs")
+        tx_mbs = (prim or {}).get("tx_mbs")
         samples = {
             "cpu": (s.get("cpu") or {}).get("percent"),
             "mem": (s.get("mem") or {}).get("percent"),
@@ -965,6 +1346,8 @@ def push_history(s):
             "gtt": (gpu.get("gtt") or {}).get("percent"),
             "vram": (gpu.get("vram") or {}).get("percent"),
             "disk": None if read_mbs is None or write_mbs is None else round(read_mbs + write_mbs, 2),
+            # 主接口收发合计（与硬盘同口径：只表达"链路有多忙"）
+            "net": None if rx_mbs is None or tx_mbs is None else round(rx_mbs + tx_mbs, 2),
         }
         for k, v in samples.items():
             _history[k].append(v)
@@ -1047,6 +1430,157 @@ def disk_io():
         "iops": round((cur[1] - prev[1] + cur[3] - prev[3]) / dt),
         "util_pct": round(min(100.0, (cur[5] - prev[5]) / (dt * 1000) * 100), 1),
     }
+
+
+# ---------------------------------------------------------------- 网络状态
+
+# 物理网卡的判断：/sys/class/net 里只有真网卡带 device 符号链接，虚拟接口
+# （lo / docker0 / veth* / br-*）没有 —— 面板只报告物理链路。
+_net_prev = None                      # (monotonic_ts, {iface: (rx_bytes, tx_bytes)})
+_wifi_cache = {"at": 0.0, "by": {}}   # iface -> (signal_dbm, ssid, rx_bitrate_mbps)
+
+
+def _if_ipv4(name):
+    """接口的 IPv4 地址。SIOCGIFADDR ioctl，不 spawn 外部命令。"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            r = fcntl.ioctl(s.fileno(), 0x8915, struct.pack("256s", name.encode()[:15]))
+        return socket.inet_ntoa(r[20:24])
+    except OSError:
+        return None
+
+
+def _netdev_counters():
+    """{iface: (rx_bytes, tx_bytes)}，来自 /proc/net/dev。"""
+    out = {}
+    try:
+        with open("/proc/net/dev") as f:
+            f.readline()
+            f.readline()
+            for line in f:
+                name, _, rest = line.partition(":")
+                p = rest.split()
+                if name.strip() and len(p) >= 9:
+                    out[name.strip()] = (int(p[0]), int(p[8]))
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def _default_route():
+    """默认路由的 (接口, 网关)。/proc/net/route 里网关是 16 进制小端。"""
+    try:
+        with open("/proc/net/route") as f:
+            f.readline()
+            for line in f:
+                p = line.split()
+                if len(p) >= 4 and p[1] == "00000000" and int(p[3], 16) & 0x2:
+                    return p[0], socket.inet_ntoa(struct.pack("<L", int(p[2], 16)))
+    except (OSError, ValueError, struct.error):
+        pass
+    return None, None
+
+
+def _parse_iw_link(txt):
+    """iw dev <if> link 的输出 -> (signal_dbm, ssid, rx_bitrate_mbps)，全缺返回 None。"""
+    sig = ssid = rate = None
+    m = re.search(r"^\s*signal:\s*(-?\d+) dBm", txt, re.M)
+    if m:
+        sig = int(m.group(1))
+    m = re.search(r"^\s*SSID:\s*(.+)$", txt, re.M)
+    if m:
+        ssid = m.group(1).strip()
+    m = re.search(r"^\s*rx bitrate:\s*([\d.]+)", txt, re.M)
+    if m:
+        rate = round(float(m.group(1)))
+    if sig is None and ssid is None and rate is None:
+        return None
+    return (sig, ssid, rate)
+
+
+def _wifi_link(iface):
+    """WiFi 的 SSID / 信号 / 协商速率。按 10 s 缓存地跑一次 `iw`。
+
+    面板的"系统状态全读 /proc 与 /sys、不 spawn 外部命令"在这里开第二处例外
+    （第一处是 NPU 的 docker exec 流），原因同类：内核在这台机器上没给 WiFi 的
+    /proc、/sys 通路（/proc/net/wireless 空、sysfs 的 wireless/ 目录无文件），
+    而信号是 WiFi 唯一的健康读数。10 s 一读 + 3 s 超时 + 失败静默降级（只是少
+    一个标签），1 Hz 的采集器不会变成每秒 spawn 一次。"""
+    now = time.monotonic()
+    if now - _wifi_cache["at"] > 10.0:
+        _wifi_cache["at"] = now
+        _wifi_cache["by"] = {}
+        try:
+            names = [n for n in os.listdir("/sys/class/net")
+                     if os.path.isdir(f"/sys/class/net/{n}/wireless")]
+        except OSError:
+            names = []
+        for name in names:
+            try:
+                r = subprocess.run(["iw", "dev", name, "link"],
+                                   capture_output=True, text=True, timeout=3)
+                if r.returncode == 0:
+                    _wifi_cache["by"][name] = _parse_iw_link(r.stdout)
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return _wifi_cache["by"].get(iface)
+
+
+def net_stat():
+    """本机网络状态：物理接口的 up/down、IPv4、实时吞吐（两次采样求差）、
+    WiFi 的 SSID/信号/协商速率，以及默认路由接口与网关。"""
+    global _net_prev
+    counters = _netdev_counters()
+    ts = time.monotonic()
+    def_if, gateway = _default_route()
+
+    try:
+        names = sorted(os.listdir("/sys/class/net"))
+    except OSError:
+        names = []
+    ifaces = []
+    for name in names:
+        base = f"/sys/class/net/{name}"
+        if name == "lo" or not os.path.exists(f"{base}/device"):
+            continue
+        state = _rd(f"{base}/operstate")
+        speed = _ri(f"{base}/speed")
+        wifi = os.path.isdir(f"{base}/wireless")
+        rec = {
+            "name": name,
+            "kind": "wifi" if wifi else "eth",
+            "operstate": state,
+            "up": state == "up" or _rd(f"{base}/carrier") == "1",
+            "speed_mbps": speed if speed and speed > 0 else None,
+            "ipv4": _if_ipv4(name),
+        }
+        if wifi:
+            link = _wifi_link(name)
+            if link:
+                rec["signal_dbm"], rec["ssid"], rec["bitrate_rx_mbps"] = link
+        rx, tx = counters.get(name, (None, None))
+        if rx is not None:
+            rec["rx_gb"] = round(rx / 1e9, 2)
+            rec["tx_gb"] = round(tx / 1e9, 2)
+        ifaces.append(rec)
+
+    warming = True
+    if _net_prev and ts - _net_prev[0] > 0:
+        dt, prev = ts - _net_prev[0], _net_prev[1]
+        warming = False
+        for rec in ifaces:
+            pr, cur = prev.get(rec["name"]), counters.get(rec["name"])
+            if not pr or not cur or cur[0] < pr[0] or cur[1] < pr[1]:
+                continue          # 接口新出现或计数器回绕：本轮不给速率
+            rec["rx_mbs"] = round((cur[0] - pr[0]) / dt / 1e6, 3)
+            rec["tx_mbs"] = round((cur[1] - pr[1]) / dt / 1e6, 3)
+    _net_prev = (ts, counters)
+
+    primary = (next((r["name"] for r in ifaces if r["name"] == def_if), None)
+               or next((r["name"] for r in ifaces if r["up"]), None)
+               or (ifaces[0]["name"] if ifaces else None))
+    return {"ifaces": ifaces, "primary": primary, "gateway": gateway,
+            "warming": warming}
 
 
 _cpu_prev = None
@@ -1308,6 +1842,9 @@ def sysinfo():
         out["disk"] = None
     out["disk_io"] = disk_io()
 
+    # 网络：物理接口的 up/down、IP、实时吞吐、WiFi 信息、默认路由
+    out["net"] = net_stat()
+
     # GPU：利用率 / 温度 / 功耗 / 频率 / 显存 / 共享显存
     dev, hw = gpu_paths()
     if dev:
@@ -1404,19 +1941,21 @@ async def status(engine: str = DEFAULT_ENGINE, fresh=False):
             active, enabled, uptime, start_key = va, ve, vu, vkey
     _active_cache["active"] = active
     if active in ("active", "activating"):
-        eng = await engine_state(engine)
+        eng = await engine_state(engine, start_key)
     else:
         eng = {"ready": False, "status": "stopped"}
 
-    # 三个引擎互斥，但切换的过渡期（正在停 A 再起 B）各边状态都要能看见：
+    # 六个引擎互斥，但切换的过渡期（正在停 A 再起 B）各边状态都要能看见：
     # 前端的确认框与"正在切换"提示依赖 units 与 active_engine。
     units = {engine: {"active": active, "enabled": enabled, "uptime_s": uptime,
                       "variant": vactive}}
     active_engine = engine if active in ("active", "activating", "deactivating") else None
+    other_start = {}
     for k in ENGINE_KEYS:
         if k == engine:
             continue
-        oa, oe, ou, _ = await unit_state(k)
+        oa, oe, ou, okey = await unit_state(k)
+        other_start[k] = okey
         units[k] = {"active": oa, "enabled": oe, "uptime_s": ou}
         if oa in ("active", "activating", "deactivating"):
             active_engine = k
@@ -1425,10 +1964,10 @@ async def status(engine: str = DEFAULT_ENGINE, fresh=False):
     sys, met, hist = snapshot["sys"], snapshot["metrics"], snapshot["history"]
 
     # 选中的引擎没在跑时，正在跑的那个的状态也要给（前端顶栏按 active 引擎描述）。
-    # engine_state 按引擎问自己那个端口（8731 或 strata 的 8088）。
+    # engine_state 按引擎问 8731 上它自己的那个端点。
     engine_states = {engine: eng}
     if active_engine and active_engine != engine:
-        engine_states[active_engine] = await engine_state(active_engine)
+        engine_states[active_engine] = await engine_state(active_engine, other_start.get(active_engine))
 
     return {
         "engine_key": engine,
@@ -1508,6 +2047,52 @@ async def upstream_latest():
     return latest, error
 
 
+# hipfire / gufo 与 halogen 一样按 tag 比较，但仓库不同；各自一份缓存，避免把
+# 上游标签混在一起。标签形如 v0.4.2.1 / v0.20.0，version_key 已能处理。
+_hipfire_remote = {"at": 0.0, "latest": None, "error": None}
+_gufo_remote = {"at": 0.0, "latest": None, "error": None}
+
+
+async def _latest_tag(repo, cache):
+    """GitHub tags 里最大的版本标签（vX.Y[.Z...]），按 repo 各自缓存。"""
+    now = time.monotonic()
+    ttl = UPDATE_FAIL_TTL if cache["error"] else UPDATE_TTL
+    if cache["at"] and now - cache["at"] < ttl:
+        return cache["latest"], cache["error"]
+
+    latest, error = None, None
+    try:
+        headers = {"Accept": "application/vnd.github+json",
+                   "User-Agent": "halogen-control-panel"}
+        url = f"https://api.github.com/repos/{repo}/tags?per_page=30"
+        async with ClientSession(timeout=ClientTimeout(total=6)) as s:
+            async with s.get(url, headers=headers) as r:
+                if r.status != 200:
+                    error = f"HTTP {r.status}"
+                else:
+                    # hipfire 的 tags 里混有 safety/win_<hash>_<date> 这类非版本标签；
+                    # 只留 vX.Y[.Z...] 的发布标签，否则 version_key 会把它们排到最前。
+                    tags = [t.get("name") for t in await r.json()
+                            if t.get("name")
+                            and re.fullmatch(r"v?\d+\.\d+(?:\.\d+)*", t["name"])]
+                    latest = max(tags, key=version_key) if tags else None
+                    if not tags:
+                        error = "没有版本标签"
+    except Exception as e:  # noqa: BLE001
+        error = f"{type(e).__name__}: {e}"
+
+    cache.update(at=now, latest=latest, error=error)
+    return latest, error
+
+
+async def hipfire_latest():
+    return await _latest_tag("warpfront/hipfire", _hipfire_remote)
+
+
+async def gufo_latest():
+    return await _latest_tag(ENGINES["gufo"]["repo"], _gufo_remote)
+
+
 # kyojin / strata 是源码构建：用 git 提交标识本地代码，跟 GitHub 默认分支比。
 # 一次 compare API 就能同时拿到"落后/领先几个提交"，与 tags 检查共用同一套缓存时长。
 _commit_remote = {}       # engine -> 该引擎的缓存（键里带本地 sha）
@@ -1517,6 +2102,13 @@ async def git_head(engine):
     """本地短提交号（如 e9588ac）；读不到返回 None。"""
     rc, out = await run("git", "-C", ENGINES[engine]["dir"],
                         "rev-parse", "--short", "HEAD", timeout=10)
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+async def git_tag(engine):
+    """本地 HEAD 的 exact tag（如 v0.4.2.1）；不在 tag 上返回 None。"""
+    rc, out = await run("git", "-C", ENGINES[engine]["dir"],
+                        "describe", "--tags", "--exact-match", timeout=10)
     return out.strip() if rc == 0 and out.strip() else None
 
 
@@ -1599,6 +2191,23 @@ async def h_update(request):
     —— strata 虽自报版本号，但标签会落在检出之后，按提交比才准。
     前端按 kind 字段选文案。"""
     engine = engine_of(request)
+    if engine in ("hipfire", "gufo"):
+        # 与 halogen 同为 tag 口径；hipfire 本地版本来自 checkout 的 exact tag，
+        # gufo 来自容器 /props 的 build_info（0.20.0 (0c03748)）。
+        eng = await engine_state(engine)
+        local = eng.get("version")
+        latest, error = (await hipfire_latest() if engine == "hipfire"
+                         else await gufo_latest())
+        return web.json_response({
+            "engine": engine, "kind": "tag", "supported": True,
+            "repo": ENGINES[engine]["repo"],
+            "local": local,
+            "latest": latest,
+            "update_available": bool(local and latest
+                                     and version_key(latest) > version_key(local)),
+            "error": error,
+            "checked_at": int(time.time()),
+        })
     if engine in ("kyojin", "strata", "gsqhalo"):
         repo = ENGINES[engine]["repo"]
         local = await git_head(engine)
@@ -1744,6 +2353,8 @@ async def h_action(request):
     need = 105.0
     if variant:
         need = float(variants_of(engine)[variant].get("min_avail_gib") or need)
+    else:
+        need = float(ENGINES[engine].get("min_avail_gib") or need)
     waited = await _wait_launchable(need) if action in ("start", "restart") else 0.0
 
     # 先清"启动限流"计数：单元配了 StartLimitIntervalSec=600 / StartLimitBurst=3
