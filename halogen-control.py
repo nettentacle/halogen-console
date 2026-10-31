@@ -5,7 +5,7 @@
 --------
 * 只驱动 systemd 用户单元，不自己拼命令，这样启动方式只有一处定义：
   halogen 是 `halogen-docker.service`（2026-10-01 晚起跑在 Docker 里），
-  kyojin 是 `kyojin-glm.service`（2026-10-05 部署，GLM-5.3-Flash EXL3），
+  kyojin 是 `kyojin-qwen.service`（2026-10-22 起仅 Qwen 车道；GLM 权重/单元已回收），
   strata 是 `strata.service`（2026-10-07 部署，Qwen3.8-Flash-Next GSQ-RCO IQ3_S；当晚由 UD-IQ4_XS 切换而来），
   gsqhalo 是 `gsqhalo.service`（2026-10-07 部署，podman 容器；Qwen3.8-Flash-Next GSQ-RCO IQ3_S
   + MTP/ngram 投机解码，来自 Aristo94/GSQHalo.cpp = strix-llama 的 GSQ 量化分支），
@@ -57,6 +57,25 @@ DOCKER = "/snap/bin/docker"  # 用户单元的 PATH 不含 /snap/bin，一律绝
 PODMAN = "/usr/bin/podman"   # gsqhalo 在 rootless podman 里（无守护进程）
 GIB = 1024 ** 3
 
+# 2026-10-29：halogen 开了 HALOGEN_API_KEY（除 /health 外全部路由要 `Authorization: Bearer <key>`）。
+# 面板对所有引擎统一带上这个头——只有 halogen 认它，别的引擎忽略，省得每次按"这会儿谁在答话"判断。
+# 密钥与单元挂进容器的是同一份宿主文件（600），读不到就返回空头（等于没开鉴权，照旧工作）。
+_KEY_FILE = Path("/home/xiaoming/halogen-patch/halogen-api-key")
+
+
+def _auth_headers():
+    try:
+        key = _KEY_FILE.read_text().strip()
+    except OSError:
+        return {}
+    return {"Authorization": "Bearer " + key} if key else {}
+
+
+def _get(session, url, headers=None):
+    # 显式传 headers（GitHub 等外部请求）时不带本地引擎的鉴权头。
+    return session.get(url, headers=_auth_headers() if headers is None else headers)
+
+
 # ------------------------------------------------------------------ 引擎登记表
 #
 # 六个引擎互斥，同一时刻只应有一个在跑；所有引擎现在都绑定 8731（端口复用
@@ -84,30 +103,22 @@ ENGINES = {
             "v2": {"file": "qwen38-flash-next-v2.hgn"},
             # Quat3rnion 的 OrcaRouter-Uncensored 原生 v2 转换；2026-10-14 实测
             # 拒答 4/10→0/10、其余门禁与 v2 同级（见 ~/halogen-patch/regress-0150/）
+            # 2026-10-22 清盘删除，2026-10-30 重新下载并校验（sha256 b5bd925f…）
             "abliterated": {"file": "qwen38-flash-next-v2-abliterated.hgn"},
         },
     },
     "kyojin": {
-        "unit": "kyojin-glm",
+        # 2026-10-22：GLM-5.3-Flash 车道与权重已回收，只保留 Qwen 车道单单元。
+        "unit": "kyojin-qwen",
         "label": "kyojin",
-        "model": "GLM-5.3-Flash",
-        # 同一台引擎树跑不同模型 = 模型变体（2026-10-07 起）：GLM 与 Qwen 各一个
-        # systemd 单元，都开在 8731、同样吃满内存 —— 变体之间也互斥，切换 =
-        # 停当前变体 → 等内存 → 起目标变体（面板按钮的语义）。
-        "variants": {
-            "glm": {"unit": "kyojin-glm", "model": "GLM-5.3-Flash",
-                    "log_unit": "kyojin-glm", "min_avail_gib": 105.0},
-            "qwen": {"unit": "kyojin-qwen", "model": "Qwen3.8-Flash-Next",
-                     "log_unit": "kyojin-qwen", "min_avail_gib": 108.0},
-        },
+        "model": "Qwen3.8-Flash-Next",
         "models": "http://127.0.0.1:8731/v1/models",
         "slots": "http://127.0.0.1:8731/slots",
         "stats": "http://127.0.0.1:8731/stats",
-        # 只有 Qwen 车道有 /health（带 vision 标志）；GLM 车道没这个端点、
-        # 代码里也没有任何图像输入路径 —— 面板按"关"显示，见 engine_state_kyojin
+        # Qwen 车道有 /health（带 vision 标志）。
         "health": "http://127.0.0.1:8731/health",
         "log_kind": "journal",
-        "log_unit": "kyojin-glm",
+        "log_unit": "kyojin-qwen",
         # 源码构建，没有版本号：用 git 提交当标识（面板显示短哈希 + 落后上游几个提交）
         "repo": "Yamz-Labs/kyojin",
         "dir": "/home/xiaoming/kyojin",
@@ -538,7 +549,7 @@ async def engine_state(engine: str = DEFAULT_ENGINE, start_key: str = None):
     try:
         timeout = ClientTimeout(total=4)
         async with ClientSession(timeout=timeout) as s:
-            async with s.get(ENGINES["halogen"]["health"]) as r:
+            async with _get(s, ENGINES["halogen"]["health"]) as r:
                 d = await r.json()
                 # 8731 现在所有引擎共用：只认 halogen 专属的 version 字典，
                 # 避免把别家 /health 误当成 halogen。
@@ -578,7 +589,7 @@ async def engine_state_kyojin():
     try:
         timeout = ClientTimeout(total=4)
         async with ClientSession(timeout=timeout) as s:
-            async with s.get(ENGINES["kyojin"]["models"]) as r:
+            async with _get(s, ENGINES["kyojin"]["models"]) as r:
                 d = await r.json()
         model = None
         data = d.get("data") or []
@@ -587,7 +598,7 @@ async def engine_state_kyojin():
         vision = False                            # GLM 车道：无 /health（404）→ 关
         try:
             async with ClientSession(timeout=ClientTimeout(total=4)) as s:
-                async with s.get(ENGINES["kyojin"]["health"]) as hr:
+                async with _get(s, ENGINES["kyojin"]["health"]) as hr:
                     if hr.status == 200:
                         vision = bool((await hr.json()).get("vision"))
         except Exception:  # noqa: BLE001
@@ -596,7 +607,7 @@ async def engine_state_kyojin():
         slots = None
         try:
             async with ClientSession(timeout=ClientTimeout(total=4)) as s:
-                async with s.get(ENGINES["kyojin"]["slots"]) as r:
+                async with _get(s, ENGINES["kyojin"]["slots"]) as r:
                     slots = await r.json()
             if isinstance(slots, list) and slots:
                 ctx = slots[0].get("n_ctx")
@@ -620,9 +631,9 @@ async def engine_state_strata():
     try:
         timeout = ClientTimeout(total=4)
         async with ClientSession(timeout=timeout) as s:
-            async with s.get(ENGINES["strata"]["health"]) as r:
+            async with _get(s, ENGINES["strata"]["health"]) as r:
                 h = await r.json()
-            async with s.get(ENGINES["strata"]["stats"]) as r:
+            async with _get(s, ENGINES["strata"]["stats"]) as r:
                 st = await r.json()
         if not isinstance(st, dict) or not st.get("engine"):
             return {"ready": False, "status": "unreachable"}
@@ -651,14 +662,14 @@ async def engine_state_gsqhalo():
     try:
         timeout = ClientTimeout(total=4)
         async with ClientSession(timeout=timeout) as s:
-            async with s.get(ENGINES["gsqhalo"]["health"]) as r:
+            async with _get(s, ENGINES["gsqhalo"]["health"]) as r:
                 h = await r.json()
         model = None
         vision = False
         props_ok = False
         try:
             async with ClientSession(timeout=ClientTimeout(total=4)) as s:
-                async with s.get(ENGINES["gsqhalo"]["props"]) as r:
+                async with _get(s, ENGINES["gsqhalo"]["props"]) as r:
                     p = await r.json()
             props_ok = isinstance(p, dict)
             mp = (p or {}).get("model_path") or ""
@@ -676,7 +687,7 @@ async def engine_state_gsqhalo():
         ctx = busy = nslots = None
         try:
             async with ClientSession(timeout=ClientTimeout(total=4)) as s:
-                async with s.get(ENGINES["gsqhalo"]["slots"]) as r:
+                async with _get(s, ENGINES["gsqhalo"]["slots"]) as r:
                     slots = await r.json()
             if isinstance(slots, list) and slots:
                 ctx = slots[0].get("n_ctx")
@@ -700,14 +711,14 @@ async def engine_state_gufo():
     try:
         timeout = ClientTimeout(total=4)
         async with ClientSession(timeout=timeout) as s:
-            async with s.get(ENGINES["gufo"]["props"]) as r:
+            async with _get(s, ENGINES["gufo"]["props"]) as r:
                 p = await r.json()
         if not isinstance(p, dict) or "model_alias" not in p:
             return {"ready": False, "status": "unreachable"}
         ready = False
         try:
             async with ClientSession(timeout=ClientTimeout(total=4)) as s:
-                async with s.get(ENGINES["gufo"]["health"]) as r:
+                async with _get(s, ENGINES["gufo"]["health"]) as r:
                     ready = (await r.json()).get("status") == "ok"
         except Exception:  # noqa: BLE001
             pass
@@ -715,7 +726,7 @@ async def engine_state_gufo():
         ctx = busy = None
         try:
             async with ClientSession(timeout=ClientTimeout(total=4)) as s:
-                async with s.get(ENGINES["gufo"]["slots"]) as r:
+                async with _get(s, ENGINES["gufo"]["slots"]) as r:
                     slots = await r.json()
             if isinstance(slots, list) and slots:
                 ctx = slots[0].get("n_ctx")
@@ -750,11 +761,11 @@ async def engine_state_hipfire():
     try:
         timeout = ClientTimeout(total=4)
         async with ClientSession(timeout=timeout) as s:
-            async with s.get(ENGINES["hipfire"]["health"]) as r:
+            async with _get(s, ENGINES["hipfire"]["health"]) as r:
                 h = await r.json()
             stats = None
             try:
-                async with s.get(ENGINES["hipfire"]["stats"]) as r:
+                async with _get(s, ENGINES["hipfire"]["stats"]) as r:
                     stats = await r.json()
             except Exception:  # noqa: BLE001
                 pass
@@ -1237,7 +1248,7 @@ def _metrics_gufo(txt):
 async def _fetch_text(url, total=3):
     try:
         async with ClientSession(timeout=ClientTimeout(total=total)) as s:
-            async with s.get(url) as r:
+            async with _get(s, url) as r:
                 if r.status != 200:
                     return None
                 return await r.text()
@@ -1250,7 +1261,7 @@ async def _fetch_text(url, total=3):
 # 相关单元 + 3 秒缓存（1 Hz 采样下约每 3 秒一次子进程，可忽略不计）。
 # 2026-10-17：strata / gsqhalo / hipfire 也统一到 8731，全部纳入。
 _UNITS_8731 = (("halogen-docker", "halogen"),
-               ("kyojin-glm", "kyojin"), ("kyojin-qwen", "kyojin"),
+               ("kyojin-qwen", "kyojin"),
                ("strata", "strata"), ("gsqhalo", "gsqhalo"),
                ("hipfire-27b", "hipfire"), ("gufo", "gufo"))
 _8731_cache = {"at": 0.0, "engine": None}
@@ -2031,7 +2042,7 @@ async def upstream_latest():
         headers = {"Accept": "application/vnd.github+json",
                    "User-Agent": "halogen-control-panel"}
         async with ClientSession(timeout=timeout) as s:
-            async with s.get(UPDATE_TAGS_API, headers=headers) as r:
+            async with _get(s, UPDATE_TAGS_API, headers=headers) as r:
                 if r.status != 200:
                     error = f"HTTP {r.status}"
                 else:
@@ -2066,7 +2077,7 @@ async def _latest_tag(repo, cache):
                    "User-Agent": "halogen-control-panel"}
         url = f"https://api.github.com/repos/{repo}/tags?per_page=30"
         async with ClientSession(timeout=ClientTimeout(total=6)) as s:
-            async with s.get(url, headers=headers) as r:
+            async with _get(s, url, headers=headers) as r:
                 if r.status != 200:
                     error = f"HTTP {r.status}"
                 else:
@@ -2135,7 +2146,7 @@ async def git_upstream(engine, local):
         headers = {"Accept": "application/vnd.github+json",
                    "User-Agent": "halogen-control-panel"}
         async with ClientSession(timeout=ClientTimeout(total=6)) as s:
-            async with s.get(url, headers=headers) as resp:
+            async with _get(s, url, headers=headers) as resp:
                 if resp.status == 404:
                     error = "本地提交不在上游（可能被 force-push 过）"
                 elif resp.status != 200:

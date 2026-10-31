@@ -862,11 +862,8 @@ const loc = () => LANG === 'en' ? 'en-GB' : 'zh-CN';
    ============================================================ */
 const ENGINES = {
   halogen: { label: 'halogen' },
-  /* kyojin 有两个模型变体（各自一个 systemd 单元，同端口、同内存，互斥）：
-     切换 = 停当前变体 → 等内存 → 起目标变体（由服务端保证）。 */
-  kyojin:  { label: 'kyojin', variants: [
-    { key: 'glm',  label: 'GLM-5.3-Flash' },
-    { key: 'qwen', label: 'Qwen3.8-Flash-Next' }] },
+  /* 2026-10-22：GLM 车道与权重已回收，kyojin 只剩 Qwen 单车道、无模型子选择。 */
+  kyojin:  { label: 'kyojin' },
   strata:  { label: 'strata' },
   /* gsqhalo：podman 容器（GSQHalo.cpp），源码构建无版本号 → 显示 git 短提交 */
   gsqhalo: { label: 'gsqhalo' },
@@ -889,7 +886,7 @@ let selPinned = !!ENGINES[savedEng];
 const KVAR_KEY = 'halogenKyojinVariant';
 const variantsOf = k => (ENGINES[k] && ENGINES[k].variants) || [];
 const savedVar = localStorage.getItem(KVAR_KEY);
-let KVAR = variantsOf('kyojin').some(v => v.key === savedVar) ? savedVar : 'glm';
+let KVAR = variantsOf('kyojin').some(v => v.key === savedVar) ? savedVar : 'qwen';
 let kvarPinned = !!savedVar;
 function variantLabel(k) {
   const v = variantsOf(SEL).find(x => x.key === k);

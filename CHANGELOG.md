@@ -2,6 +2,32 @@
 
 Notable changes to the HALOGEN Console (8733).
 
+## 2026-10-29 — 跟随引擎 API 鉴权（HALOGEN_API_KEY）
+- halogen 开启本地 API 鉴权后（除 `/health` 外全部路由要
+  `Authorization: Bearer <key>`），面板新增 `_auth_headers()` + `_get()`：
+  读与容器挂载的**同一份宿主密钥文件**（600），对本机引擎的所有请求统一带
+  鉴权头——六个引擎都带、只有 halogen 校验，省得按"这会儿谁在答话"分支。
+  密钥文件读不到就返回空头（等于没开鉴权，照旧工作）。
+- 对外部主机（GitHub tags / compare）的请求**显式传 `headers=`**，
+  不带本地引擎的密钥——密钥不出机器。同日引入时的一个形参缺陷见下条。
+
+## 2026-10-29 — 修复：更新检查全部失败
+- 引入本地 API 鉴权时新增的 `_get()` 助手只接受 `(session, url)`，内部固定附加
+  引擎鉴权头；而三处 GitHub 查询（tags / compare）以 `headers=` 关键字调用它，
+  全部抛 `TypeError: _get() got an unexpected keyword argument 'headers'`，
+  六引擎的 `/api/update` 一律报错。
+- `_get()` 现在接受可选 `headers`：显式传入（外部请求）时原样使用、不带本地
+  引擎的 `Authorization` 头；未传时行为不变。
+
+## 2026-10-22 — kyojin 收为 Qwen 单车道
+- GLM-5.3-Flash 车道与权重回收（主机清盘），kyojin 只剩 `kyojin-qwen`
+  一个 systemd 单元：`ENGINES["kyojin"]` 的 `variants` 注册表摘除
+  （`unit`/`model`/`log_unit` 直接指向 Qwen 车道），`_UNITS_8731` 去掉
+  `kyojin-glm`。
+- 前端引擎注册表同步：kyojin 不再渲染模型子选择器（变体机制本身保留，
+  引擎登记了 `variants` 就会出现）；默认变体常量落到 `qwen`。
+- 服务状态/视觉行照旧来自 `/v1/models` 与 `/health`（Qwen 车道行为不变）。
+
 ## 2026-10-21 — gufo（第六个引擎）
 - Added `gufo` to `ENGINES`: unit `gufo`, port 8731, rootless podman container
   (`ghcr.io/gufo-org/toolboxes/gufo-runtime`), Qwen3.8-Flash-Next UD-Q4_K_XL +
