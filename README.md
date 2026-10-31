@@ -20,6 +20,7 @@ Two files, no build step, one dependency:
 |---|---|
 | `halogen-control.py` | aiohttp backend — serves the page and a small JSON API |
 | `halogen-control.html` | the entire frontend (markup + CSS + JS in one file) |
+| `skins/glass.html` | alternative **glassmorphism skin** — drop-in replacement for the html |
 | `halogen-control.service` | systemd **user** unit to run it |
 
 The backend never launches engines by hand-crafted commands: it drives **systemd user units** only, so "how an engine starts" is defined in exactly one place. System state (CPU, memory, GPU VRAM, NPU) is read from `/proc` and `/sys` — no external tools.
@@ -50,6 +51,19 @@ All six engines bind **8731**; only one runs at a time (enforced by the panel), 
 - **Bilingual UI (zh/en)**: static text via `data-i18n` tags, dynamic text via an `I18N` dict; switching re-renders from in-memory state so you never see a half-translated screen. Server-side error strings follow the `X-Lang` header. Choice persists in `localStorage`.
 - **CSRF guard without auth**: the LAN is trusted (no password), but every POST must carry `Content-Type: application/json`. That makes it a non-simple request, so a cross-site `fetch` would trigger a CORS preflight — which this service never answers — and thus a random webpage cannot stop your model.
 - **Engine API auth passthrough**: if the halogen engine runs with `HALOGEN_API_KEY`, the panel reads the same key file and attaches `Authorization: Bearer …` to every local engine request (all engines get the header; only halogen checks it). Requests to external hosts (GitHub) always use their own headers, so the key never leaves the machine. If the key file is absent the header is simply omitted and everything works as before.
+
+### Skins
+
+The entire UI lives in the HTML file, and the backend serves whichever `halogen-control.html` sits next to it — re-read on mtime change, so swapping skins needs **no restart, just a browser refresh**:
+
+- **Classic** (`halogen-control.html`, default): the original "instrument panel" design — flat surfaces, mono readouts, one glowing status dot.
+- **Glass** (`skins/glass.html`): a glassmorphism reskin of the same page — frosted translucent cards, a cursor spotlight, hand-drawn glass dropdowns (a native `<option>` can't be frosted), the checkpoint tier shown on the loaded-model row, light & dark themes. The backend is byte-identical.
+
+Switch with `cp skins/glass.html halogen-control.html` (keep the classic file around — or `git checkout -- halogen-control.html` — to switch back).
+
+| Glass, dark | Glass, light |
+|---|---|
+| ![Glass skin, dark theme](docs/screenshot-glass-dark.png) | ![Glass skin, light theme](docs/screenshot-glass-light.png) |
 
 ### Quick start
 
@@ -107,6 +121,7 @@ All engine-scoped routes accept `?engine=` (plus `&variant=` where an engine def
 - **中英双语界面**：静态文案 `data-i18n` + 动态文案 `I18N` 字典，切换语言从内存状态整体重渲染；服务端错误文案跟随 `X-Lang` 请求头；选择存 `localStorage`。
 - **无口令但有 CSRF 防护**：所有 POST 要求 `Content-Type: application/json`（非简单请求 → 跨站 fetch 必触发 CORS 预检，而本服务不返回 CORS 头），别的网页无法诱导浏览器停掉模型。
 - **跟随引擎 API 鉴权**：halogen 开 `HALOGEN_API_KEY` 时，面板读同一份密钥文件，对本机引擎的所有请求统一带 `Authorization: Bearer …`（六个引擎都带，只有 halogen 校验）；对外部主机（GitHub）的请求始终用自己的头，密钥不出机器。密钥文件不存在就省略该头，一切照旧。
+- **两套皮肤**：整个 UI 就是那个 HTML，后端只渲染旁边的 `halogen-control.html`（按 mtime 热加载——换肤不用重启，刷新浏览器即可）。默认「仪表台」经典版；`skins/glass.html` 是玻璃拟态版（磨砂半透明卡片 + 鼠标聚光 + 自绘玻璃下拉 + 已加载模型行带检查点档位，明暗主题），后端与经典版逐字节相同，`cp skins/glass.html halogen-control.html` 即切换。
 - **前端热更新**：HTML 按 mtime 缓存，改完刷新即生效；改 `.py` 需 `systemctl --user restart halogen-control.service`。
 
 快速开始见上文 [Quick start](#quick-start)。

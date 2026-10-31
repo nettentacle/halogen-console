@@ -2,6 +2,15 @@
 
 Notable changes to the HALOGEN Console (8733).
 
+## 2026-10-31 — glass skin 入库
+- 仓库收纳第二套前端皮肤 `skins/glass.html`（即 `~/halogen-control-glass/`
+  的玻璃拟态版）：磨砂半透明卡片、鼠标聚光、自绘玻璃下拉（原生 option
+  做不了磨砂）、已加载模型行带检查点档位、明暗主题。
+- **后端零改动**：玻璃目录里的 `halogen-control.py` 与经典版**逐字节相同**
+  ——"皮肤"就是另一份 html；后端按 mtime 热加载，
+  `cp skins/glass.html halogen-control.html` + 浏览器刷新即完成切换。
+- `docs/` 新增明暗两张玻璃版实况截图（`screenshot-glass-{dark,light}.png`）。
+
 ## 2026-10-29 — 跟随引擎 API 鉴权（HALOGEN_API_KEY）
 - halogen 开启本地 API 鉴权后（除 `/health` 外全部路由要
   `Authorization: Bearer <key>`），面板新增 `_auth_headers()` + `_get()`：
